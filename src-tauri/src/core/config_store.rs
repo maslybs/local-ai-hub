@@ -45,12 +45,30 @@ pub struct CodexConfig {
   // If not set, we fall back to current working directory of the app process.
   #[serde(default)]
   pub workspace_dir: Option<String>,
+
+  // Used when the workspace folder has no AGENTS.md / AGENTS.override.md.
+  // Keep it short and product-oriented; avoid listing file paths or internal details.
+  #[serde(default)]
+  pub universal_instructions: String,
+
+  // If true, universal_instructions are only applied when the workspace has no AGENTS.md.
+  // If false, universal_instructions always apply (as a "global" baseline).
+  #[serde(default = "default_universal_fallback_only")]
+  pub universal_fallback_only: bool,
 }
 
 impl Default for CodexConfig {
   fn default() -> Self {
-    Self { workspace_dir: None }
+    Self {
+      workspace_dir: None,
+      universal_instructions: String::new(),
+      universal_fallback_only: default_universal_fallback_only(),
+    }
   }
+}
+
+fn default_universal_fallback_only() -> bool {
+  true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -21,6 +21,7 @@ use tokio::{
 
 use super::types::CodexStatus;
 use crate::core::{logbus, paths};
+use std::collections::VecDeque;
 
 #[derive(Clone)]
 pub struct CodexRuntime {
@@ -36,6 +37,8 @@ struct Inner {
   status: RwLock<CodexStatus>,
   child: Mutex<Option<Child>>,
   stdin: Mutex<Option<BufWriter<ChildStdin>>>,
+  lifecycle_lock: Mutex<()>,
+  stderr_tail: Mutex<VecDeque<String>>,
   next_id: AtomicU64,
   pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
   pending_turns: Mutex<HashMap<String, PendingTurn>>,
@@ -43,8 +46,12 @@ struct Inner {
   resumed_threads: Mutex<HashSet<String>>,
   busy_chats: Mutex<HashSet<i64>>,
   chat_threads_path: Option<PathBuf>,
+  codex_home_dir: Option<PathBuf>,
+  app_global_agents_override: Option<PathBuf>,
   logs: logbus::LogBus,
   default_cwd: RwLock<Option<String>>,
+  universal_instructions: RwLock<String>,
+  universal_fallback_only: RwLock<bool>,
 }
 
 struct PendingTurn {
@@ -58,6 +65,8 @@ struct PendingTurn {
 impl CodexRuntime {
   pub fn new(app: &AppHandle, logs: logbus::LogBus) -> Self {
     let (chat_threads_path, chat_threads) = load_chat_threads(app);
+    let codex_home_dir = paths::codex_home_dir(app).ok();
+    let app_global_agents_override = paths::codex_global_agents_override_path(app).ok();
     let default_cwd = std::env::current_dir()
       .ok()
       .and_then(|p| p.to_str().map(|s| s.to_string()));
@@ -66,6 +75,8 @@ impl CodexRuntime {
         status: RwLock::new(CodexStatus::default()),
         child: Mutex::new(None),
         stdin: Mutex::new(None),
+        lifecycle_lock: Mutex::new(()),
+        stderr_tail: Mutex::new(VecDeque::with_capacity(40)),
         next_id: AtomicU64::new(1),
         pending: Mutex::new(HashMap::new()),
         pending_turns: Mutex::new(HashMap::new()),
@@ -73,8 +84,12 @@ impl CodexRuntime {
         resumed_threads: Mutex::new(HashSet::new()),
         busy_chats: Mutex::new(HashSet::new()),
         chat_threads_path,
+        codex_home_dir,
+        app_global_agents_override,
         logs,
         default_cwd: RwLock::new(default_cwd),
+        universal_instructions: RwLock::new(String::new()),
+        universal_fallback_only: RwLock::new(true),
       }),
     }
   }
@@ -85,13 +100,57 @@ impl CodexRuntime {
       if t.is_empty() { None } else { Some(t) }
     });
     *self.inner.default_cwd.write().await = ws;
+    // Best-effort: update override file if Codex is already running.
+    self.prepare_codex_home().await;
+  }
+
+  pub async fn set_universal_instructions(&self, instructions: String, fallback_only: bool) {
+    *self.inner.universal_instructions.write().await = instructions;
+    *self.inner.universal_fallback_only.write().await = fallback_only;
+    // Best-effort: update override file if Codex is already running.
+    self.prepare_codex_home().await;
   }
 
   pub async fn status(&self) -> CodexStatus {
     self.inner.status.read().await.clone()
   }
 
+  pub async fn reset_threads(&self) -> Result<(), String> {
+    // Clear thread mappings so the next message starts a fresh Codex thread.
+    {
+      let mut resumed = self.inner.resumed_threads.lock().await;
+      resumed.clear();
+    }
+    {
+      let mut busy = self.inner.busy_chats.lock().await;
+      busy.clear();
+    }
+    {
+      let mut turns = self.inner.pending_turns.lock().await;
+      turns.clear();
+    }
+    {
+      let mut threads = self.inner.chat_threads.lock().await;
+      threads.clear();
+      persist_chat_threads(self.inner.chat_threads_path.as_ref(), &threads)?;
+    }
+
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Warn, "codex", "reset all thread mappings");
+    Ok(())
+  }
+
   pub async fn stop(&self) -> Result<(), String> {
+    let pid = {
+      let child = self.inner.child.lock().await;
+      child.as_ref().and_then(|c| c.id())
+    };
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Warn, "codex", format!("stop() called pid={}", pid.map(|p| p.to_string()).unwrap_or_else(|| "none".to_string())));
     {
       let mut child = self.inner.child.lock().await;
       if let Some(c) = child.as_mut() {
@@ -155,36 +214,22 @@ impl CodexRuntime {
   }
 
   pub async fn ensure_started(&self) -> Result<(), String> {
+    // Codex app-server is stdio-based; if we accidentally spawn it multiple times concurrently,
+    // we can end up dropping stdin for one process and it will exit immediately. Serialize lifecycle.
+    let _guard = self.inner.lifecycle_lock.lock().await;
+    self.ensure_started_locked().await
+  }
+
+  async fn ensure_started_locked(&self) -> Result<(), String> {
     if self.inner.status.read().await.running {
       return Ok(());
     }
 
-    self.inner.logs.push(logbus::LogLevel::Info, "codex", "starting app-server");
-    let mut cmd = Command::new("codex");
-    cmd
-      .arg("app-server")
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::piped());
+    self.prepare_codex_home().await;
 
-    let mut child = match cmd.spawn() {
-      Ok(c) => c,
-      Err(e) => {
-        let extra = match e.kind() {
-          io::ErrorKind::NotFound => " (binary 'codex' not found in PATH)",
-          _ => "",
-        };
-        let msg = format!("Failed to start codex app-server{extra}: {e}");
-        {
-          let mut st = self.inner.status.write().await;
-          st.running = false;
-          st.initialized = false;
-          st.last_error = Some(msg.clone());
-        }
-        self.inner.logs.push(logbus::LogLevel::Error, "codex", msg.clone());
-        return Err(msg);
-      }
-    };
+    self.inner.logs.push(logbus::LogLevel::Info, "codex", "starting app-server");
+    let mut child = self.spawn_codex_app_server().await?;
+    let pid = child.id();
     let stdin = child.stdin.take().ok_or_else(|| "Failed to open codex stdin".to_string())?;
     let stdout = child.stdout.take().ok_or_else(|| "Failed to open codex stdout".to_string())?;
     let stderr = child.stderr.take().ok_or_else(|| "Failed to open codex stderr".to_string())?;
@@ -197,7 +242,10 @@ impl CodexRuntime {
       st.initialized = false;
       st.last_error = None;
     }
-    self.inner.logs.push(logbus::LogLevel::Info, "codex", "app-server running");
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Info, "codex", format!("app-server running pid={}", pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string())));
 
     let inner = self.inner.clone();
     tauri::async_runtime::spawn(async move {
@@ -210,11 +258,36 @@ impl CodexRuntime {
         match serde_json::from_str::<Value>(line) {
           Ok(msg) => handle_server_msg(inner.clone(), msg).await,
           Err(e) => {
-            let mut st = inner.status.write().await;
-            let msg = format!("codex stdout parse failed: {e}");
-            st.last_error = Some(msg.clone());
-            inner.logs.push(logbus::LogLevel::Error, "codex", msg);
+            // Be tolerant: if codex prints a non-JSON warning to stdout, don't brick the connection.
+            // Log it and keep reading.
+            let snippet: String = line.chars().take(220).collect();
+            inner.logs.push(
+              logbus::LogLevel::Warn,
+              "codex",
+              format!("codex stdout non-JSON line (ignored): {e}: {snippet}"),
+            );
           }
+        }
+      }
+
+      // The app-server closed stdout (process exited or stdio was closed).
+      // Fail any pending requests/turns so callers (Telegram/UI) don't hang until timeouts.
+      {
+        let mut pending = inner.pending.lock().await;
+        for (_, tx) in pending.drain() {
+          let _ = tx.send(Err("codex app-server stopped".to_string()));
+        }
+      }
+      {
+        let mut turns = inner.pending_turns.lock().await;
+        let items: Vec<(String, PendingTurn)> = turns.drain().collect();
+        drop(turns);
+        for (_, p) in items {
+          {
+            let mut busy = inner.busy_chats.lock().await;
+            busy.remove(&p.chat_id);
+          }
+          let _ = p.done.send(Err("Codex disconnected".to_string()));
         }
       }
 
@@ -225,6 +298,17 @@ impl CodexRuntime {
         st.last_error = Some("codex app-server stopped".to_string());
       }
       inner.logs.push(logbus::LogLevel::Warn, "codex", "app-server stopped");
+
+      // If stdout is closed, the stdio RPC transport is broken. Kill the child (if any) so a
+      // subsequent connect can restart cleanly.
+      {
+        let mut child = inner.child.lock().await;
+        if let Some(c) = child.as_mut() {
+          let _ = c.kill().await;
+        }
+        *child = None;
+      }
+      *inner.stdin.lock().await = None;
     });
 
     let inner2 = self.inner.clone();
@@ -236,11 +320,62 @@ impl CodexRuntime {
       }
     });
 
+    // Monitor for child exit and log exit status + stderr tail.
+    let inner3 = self.inner.clone();
+    tauri::async_runtime::spawn(async move {
+      loop {
+        tokio::time::sleep(Duration::from_millis(350)).await;
+
+        let status_opt = {
+          let mut child = inner3.child.lock().await;
+          let Some(c) = child.as_mut() else { return; };
+          match c.try_wait() {
+            Ok(s) => s,
+            Err(e) => {
+              inner3.logs.push(logbus::LogLevel::Warn, "codex", format!("try_wait failed: {e}"));
+              None
+            }
+          }
+        };
+
+        if let Some(status) = status_opt {
+          let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "none".to_string());
+          #[cfg(unix)]
+          let sig = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map(|s| s.to_string()).unwrap_or_else(|| "none".to_string())
+          };
+          #[cfg(not(unix))]
+          let sig = "n/a".to_string();
+
+          let tail = {
+            let t = inner3.stderr_tail.lock().await;
+            t.iter().cloned().collect::<Vec<_>>().join("\n")
+          };
+
+          inner3.logs.push(
+            logbus::LogLevel::Error,
+            "codex",
+            format!("app-server exited code={code} signal={sig} pid={}", pid.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string())),
+          );
+          if !tail.trim().is_empty() {
+            inner3.logs.push(logbus::LogLevel::Error, "codex", format!("app-server stderr tail:\n{tail}"));
+          }
+
+          // Clean up handles so future calls can restart.
+          *inner3.stdin.lock().await = None;
+          *inner3.child.lock().await = None;
+          return;
+        }
+      }
+    });
+
     Ok(())
   }
 
   pub async fn ensure_initialized(&self) -> Result<(), String> {
-    self.ensure_started().await?;
+    let _guard = self.inner.lifecycle_lock.lock().await;
+    self.ensure_started_locked().await?;
     if self.inner.status.read().await.initialized {
       return Ok(());
     }
@@ -256,9 +391,14 @@ impl CodexRuntime {
     let _ = self.send_request("initialize", params).await?;
     self.send_notification("initialized", None).await?;
 
-    let mut st = self.inner.status.write().await;
-    st.initialized = true;
+    {
+      let mut st = self.inner.status.write().await;
+      st.initialized = true;
+    }
     self.inner.logs.push(logbus::LogLevel::Info, "codex", "initialized");
+
+    // Populate auth status early so UI/Telegram can surface "sign in required" without waiting for failures.
+    let _ = self.refresh_account_state().await;
     Ok(())
   }
 
@@ -287,6 +427,7 @@ impl CodexRuntime {
 
   async fn start_turn_stream_inner(&self, chat_id: i64, text: &str) -> Result<CodexStream, String> {
     self.ensure_initialized().await?;
+    self.ensure_account_ready().await?;
 
     let thread_id = self.thread_for_chat(chat_id).await?;
     self
@@ -304,7 +445,26 @@ impl CodexRuntime {
     if let Some(cwd) = self.inner.default_cwd.read().await.clone() {
       params["cwd"] = Value::String(cwd);
     }
-    let turn_start = self.send_request("turn/start", params).await?;
+    let turn_start = match self.send_request("turn/start", params.clone()).await {
+      Ok(v) => v,
+      Err(e) => {
+        if let Some(bad) = extract_no_rollout_thread_id(&e) {
+          self
+            .inner
+            .logs
+            .push(logbus::LogLevel::Warn, "codex", "turn/start failed (no rollout); resetting thread and retrying");
+          // Reset mapping(s) and retry with a fresh thread.
+          // Use a full reset to handle any persistence/migration mismatches robustly.
+          let _ = self.reset_threads().await;
+          self.reset_thread_everywhere(&bad).await;
+          let new_thread_id = self.thread_for_chat(chat_id).await?;
+          params["threadId"] = Value::String(new_thread_id);
+          self.send_request("turn/start", params).await?
+        } else {
+          return Err(e);
+        }
+      }
+    };
     let turn_id = turn_start
       .get("turn")
       .and_then(|t| t.get("id"))
@@ -346,10 +506,68 @@ impl CodexRuntime {
     Ok(CodexStream { updates_rx, done_rx })
   }
 
+  async fn ensure_account_ready(&self) -> Result<(), String> {
+    // If Codex requires OpenAI auth and we have no account, fail fast with a user-friendly error.
+    let (requires, have) = self.refresh_account_state().await.unwrap_or((false, false));
+    if requires && !have {
+      return Err("Codex requires sign-in. Open AI Core -> Codex settings and sign in (ChatGPT).".to_string());
+    }
+    Ok(())
+  }
+
+  async fn refresh_account_state(&self) -> Result<(bool, bool), String> {
+    // Docs: account/read -> { requiresOpenaiAuth, account }
+    let res = self
+      .send_request("account/read", serde_json::json!({ "refreshToken": false }))
+      .await?;
+    let requires = res
+      .get("requiresOpenaiAuth")
+      .and_then(|v| v.as_bool())
+      .unwrap_or(false);
+    let account = res.get("account").cloned().unwrap_or(Value::Null);
+
+    let auth_mode = account
+      .get("type")
+      .and_then(|v| v.as_str())
+      .map(|s| s.to_string());
+
+    let have = auth_mode.is_some();
+
+    {
+      let mut st = self.inner.status.write().await;
+      st.auth_mode = auth_mode;
+      // Don't overwrite explicit runtime errors unless this is a clear auth requirement.
+      if requires && !have {
+        st.last_error = Some("Sign in required".to_string());
+      } else if st.last_error.as_deref() == Some("Sign in required") {
+        st.last_error = None;
+      }
+    }
+
+    Ok((requires, have))
+  }
+
   async fn thread_for_chat(&self, chat_id: i64) -> Result<String, String> {
     if let Some(t) = self.inner.chat_threads.lock().await.get(&chat_id).cloned() {
-      self.resume_thread_if_needed(&t).await?;
-      return Ok(t);
+      match self.resume_thread_if_needed(&t).await {
+        Ok(_) => return Ok(t),
+        Err(e) => {
+          if let Some(bad) = extract_no_rollout_thread_id(&e) {
+            self
+              .inner
+              .logs
+              .push(logbus::LogLevel::Warn, "codex", "thread invalid (no rollout); resetting");
+            // Reset mapping(s) so the next call creates a fresh thread.
+            // Use a full reset to handle any persistence/migration mismatches robustly.
+            let _ = self.reset_threads().await;
+            // Also best-effort clear any other references to the thread id mentioned in the error.
+            self.reset_thread_everywhere(&bad).await;
+            // Fall through and create a new thread.
+          } else {
+            return Err(e);
+          }
+        }
+      }
     }
 
     self
@@ -447,6 +665,271 @@ impl CodexRuntime {
       .map_err(|e| format!("write newline failed: {e}"))?;
     w.flush().await.map_err(|e| format!("flush failed: {e}"))?;
     Ok(())
+  }
+}
+
+impl CodexRuntime {
+  async fn spawn_codex_app_server(&self) -> Result<Child, String> {
+    let env_home = self
+      .inner
+      .codex_home_dir
+      .clone()
+      .and_then(|p| p.to_str().map(|s| s.to_string()));
+
+    // Try direct spawn first (works in terminal-launched dev sessions).
+    {
+      let mut cmd = Command::new("codex");
+      cmd
+        .arg("app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+      if let Some(home) = env_home.clone() {
+        cmd.env("CODEX_HOME", home);
+      }
+      match cmd.spawn() {
+        Ok(c) => return Ok(c),
+        Err(e) => {
+          if e.kind() != io::ErrorKind::NotFound {
+            return self.fail_start(format!("Failed to start codex app-server: {e}")).await;
+          }
+          // Fall through: GUI apps on macOS often don't inherit shell PATH (nvm).
+          self
+            .inner
+            .logs
+            .push(logbus::LogLevel::Warn, "codex", "codex not found in PATH; trying login shell");
+        }
+      }
+    }
+
+    // Fallback: run through a login shell so PATH (nvm, brew, etc.) is available.
+    {
+      let mut cmd = Command::new("/bin/zsh");
+      cmd
+        .arg("-lc")
+        .arg("codex app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+      if let Some(home) = env_home.clone() {
+        cmd.env("CODEX_HOME", home);
+      }
+      match cmd.spawn() {
+        Ok(c) => Ok(c),
+        Err(e) => self
+          .fail_start(format!("Failed to start codex app-server (via /bin/zsh -lc): {e}"))
+          .await,
+      }
+    }
+  }
+
+  async fn fail_start<T>(&self, msg: String) -> Result<T, String> {
+    {
+      let mut st = self.inner.status.write().await;
+      st.running = false;
+      st.initialized = false;
+      st.last_error = Some(msg.clone());
+    }
+    self.inner.logs.push(logbus::LogLevel::Error, "codex", msg.clone());
+    Err(msg)
+  }
+
+  async fn prepare_codex_home(&self) {
+    let Some(home) = self.inner.codex_home_dir.clone() else { return; };
+    let _ = fs::create_dir_all(&home);
+
+    // If the user is already logged into Codex (e.g. via Codex Desktop), import auth so this app
+    // works "immediately" without forcing a second login flow.
+    self.import_user_codex_auth(&home).await;
+
+    // Best-effort: reuse user's installed skills by linking ~/.codex/skills into our app profile.
+    // This avoids surprising "no skills" behavior when we isolate CODEX_HOME.
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs as unix_fs;
+      let skills_dst = home.join("skills");
+      if !skills_dst.exists() {
+        if let Some(home_dir) = std::env::var_os("HOME") {
+          let skills_src = PathBuf::from(home_dir).join(".codex").join("skills");
+          if skills_src.exists() {
+            let _ = unix_fs::symlink(&skills_src, &skills_dst);
+          }
+        }
+      }
+    }
+
+    // Profile migration guard:
+    // We run Codex app-server with an app-specific CODEX_HOME (state db lives there).
+    // Old Telegram chat -> thread mappings created under a different CODEX_HOME (e.g. default ~/.codex)
+    // are invalid in this profile and cause "no rollout found" errors. Clear them once.
+    let marker = home.join(".local-ai-hub-profile-v1");
+    if !marker.exists() {
+      let _ = fs::write(&marker, "v1\n");
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&marker, fs::Permissions::from_mode(0o600));
+      }
+
+      {
+        let mut resumed = self.inner.resumed_threads.lock().await;
+        resumed.clear();
+      }
+      {
+        let mut threads = self.inner.chat_threads.lock().await;
+        if !threads.is_empty() {
+          threads.clear();
+          let _ = persist_chat_threads(self.inner.chat_threads_path.as_ref(), &threads);
+        }
+      }
+
+      self.inner.logs.push(
+        logbus::LogLevel::Warn,
+        "codex",
+        "initialized CODEX_HOME profile; cleared old chat thread mappings".to_string(),
+      );
+    }
+
+    // Write/clear the app-global AGENTS.override.md based on config and workspace contents.
+    let Some(override_path) = self.inner.app_global_agents_override.clone() else { return; };
+    let instructions = self.inner.universal_instructions.read().await.clone();
+    let fallback_only = *self.inner.universal_fallback_only.read().await;
+    let ws = self.inner.default_cwd.read().await.clone();
+
+    let should_apply = if instructions.trim().is_empty() {
+      false
+    } else if !fallback_only {
+      true
+    } else {
+      // Apply only when the workspace has no AGENTS files.
+      match ws {
+        None => true,
+        Some(dir) => {
+          let p = PathBuf::from(dir);
+          !(p.join("AGENTS.md").exists() || p.join("AGENTS.override.md").exists())
+        }
+      }
+    };
+
+    let content = if should_apply { instructions } else { String::new() };
+    if let Some(parent) = override_path.parent() {
+      let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&override_path, content);
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      let _ = fs::set_permissions(&override_path, fs::Permissions::from_mode(0o600));
+    }
+
+    if should_apply {
+      self.inner.logs.push(logbus::LogLevel::Info, "codex", "using universal instructions (AGENTS.override.md)");
+    }
+  }
+
+  async fn import_user_codex_auth(&self, codex_home: &PathBuf) {
+    // Import auth/config from ~/.codex into our app profile if missing.
+    // This keeps state isolated while preserving "already signed in" behavior.
+    let Some(home_dir) = std::env::var_os("HOME") else { return; };
+    let user_home = PathBuf::from(home_dir).join(".codex");
+
+    let auth_src = user_home.join("auth.json");
+    let auth_dst = codex_home.join("auth.json");
+    if !auth_dst.exists() && auth_src.exists() {
+      match fs::copy(&auth_src, &auth_dst) {
+        Ok(_) => {
+          #[cfg(unix)]
+          {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&auth_dst, fs::Permissions::from_mode(0o600));
+          }
+          self.inner.logs.push(logbus::LogLevel::Info, "codex", "imported auth.json from ~/.codex");
+        }
+        Err(e) => {
+          self
+            .inner
+            .logs
+            .push(logbus::LogLevel::Warn, "codex", format!("failed to import auth.json: {e}"));
+        }
+      }
+    }
+
+    // Optional: reuse the user's Codex config defaults (model, features, etc.) if we have none yet.
+    let cfg_src = user_home.join("config.toml");
+    let cfg_dst = codex_home.join("config.toml");
+    if !cfg_dst.exists() && cfg_src.exists() {
+      if fs::copy(&cfg_src, &cfg_dst).is_ok() {
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::PermissionsExt;
+          let _ = fs::set_permissions(&cfg_dst, fs::Permissions::from_mode(0o600));
+        }
+        self.inner.logs.push(logbus::LogLevel::Info, "codex", "imported config.toml from ~/.codex");
+      }
+    }
+  }
+}
+
+impl CodexRuntime {
+  async fn reset_thread_for_chat(&self, chat_id: i64) {
+    // Clear the stored thread mapping for this Telegram chat.
+    // We intentionally key by chat_id to avoid depending on exact error formatting.
+    let removed: Option<String> = {
+      let mut threads = self.inner.chat_threads.lock().await;
+      let removed = threads.remove(&chat_id);
+      if removed.is_some() {
+        if let Err(e) = persist_chat_threads(self.inner.chat_threads_path.as_ref(), &threads) {
+          self
+            .inner
+            .logs
+            .push(logbus::LogLevel::Warn, "codex", format!("failed to persist thread reset: {e}"));
+        }
+      }
+      removed
+    };
+
+    if let Some(old_thread_id) = removed {
+      {
+        let mut resumed = self.inner.resumed_threads.lock().await;
+        resumed.remove(&old_thread_id);
+      }
+      self
+        .inner
+        .logs
+        .push(logbus::LogLevel::Warn, "codex", format!("reset thread mapping for chat_id={chat_id}"));
+    }
+  }
+
+  async fn reset_thread_everywhere(&self, thread_id: &str) {
+    let thread_id = thread_id.to_string();
+
+    {
+      let mut resumed = self.inner.resumed_threads.lock().await;
+      resumed.remove(&thread_id);
+    }
+
+    let mut removed_any = false;
+    {
+      let mut threads = self.inner.chat_threads.lock().await;
+      let keys: Vec<i64> = threads
+        .iter()
+        .filter_map(|(k, v)| if v == &thread_id { Some(*k) } else { None })
+        .collect();
+      for k in keys {
+        threads.remove(&k);
+        removed_any = true;
+      }
+      if removed_any {
+        let _ = persist_chat_threads(self.inner.chat_threads_path.as_ref(), &threads);
+      }
+    }
+
+    if removed_any {
+      self
+        .inner
+        .logs
+        .push(logbus::LogLevel::Warn, "codex", "reset stored thread mapping");
+    }
   }
 }
 
@@ -598,6 +1081,23 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
 }
 
 async fn handle_codex_stderr(inner: Arc<Inner>, line: String) {
+  // Keep a short tail for post-mortem when the process exits without a visible error.
+  {
+    let mut t = inner.stderr_tail.lock().await;
+    if t.len() >= 30 {
+      t.pop_front();
+    }
+    t.push_back(line.clone());
+  }
+
+  // Surface important lines in the in-app log view (without overwhelming it).
+  let lower = line.to_lowercase();
+  if lower.contains(" error ") || lower.contains("error") {
+    inner.logs.push(logbus::LogLevel::Error, "codex(app-server)", line.clone());
+  } else if lower.contains("warn") || lower.contains("warning") {
+    inner.logs.push(logbus::LogLevel::Warn, "codex(app-server)", line.clone());
+  }
+
   let needle = "state db missing rollout path for thread ";
   if let Some(idx) = line.find(needle) {
     let after = &line[idx + needle.len()..];
@@ -636,6 +1136,31 @@ async fn handle_codex_stderr(inner: Arc<Inner>, line: String) {
       );
     }
   }
+}
+
+fn extract_no_rollout_thread_id(err: &str) -> Option<String> {
+  // Typical response we stringify: {"code":-32600,"message":"no rollout found for thread id ..."}
+  if let Ok(v) = serde_json::from_str::<Value>(err) {
+    if let Some(msg) = v.get("message").and_then(|m| m.as_str()) {
+      return extract_no_rollout_thread_id_from_message(msg);
+    }
+  }
+
+  extract_no_rollout_thread_id_from_message(err)
+}
+
+fn extract_no_rollout_thread_id_from_message(msg: &str) -> Option<String> {
+  let needle = "no rollout found for thread id ";
+  msg
+    .find(needle)
+    .map(|idx| {
+      msg[idx + needle.len()..]
+      .split_whitespace()
+      .next()
+      .unwrap_or("")
+      .to_string()
+    })
+    .filter(|s| !s.is_empty())
 }
 
 fn flush_turn_chunks(p: &mut PendingTurn, force: bool) {

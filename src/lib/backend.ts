@@ -19,6 +19,8 @@ export type TelegramConfig = {
 
 export type CodexConfig = {
   workspace_dir: string | null;
+  universal_instructions?: string;
+  universal_fallback_only?: boolean;
 };
 
 export type AppConfig = {

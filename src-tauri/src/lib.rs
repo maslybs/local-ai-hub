@@ -39,6 +39,10 @@ async fn save_config(app: AppHandle, state: State<'_, AppState>, cfg: config_sto
 
   // Keep Codex runtime in sync with config changes (workspace folder influences AGENTS.md and tool context).
   state.codex.set_workspace_dir(cfg.codex.workspace_dir.clone()).await;
+  state
+    .codex
+    .set_universal_instructions(cfg.codex.universal_instructions.clone(), cfg.codex.universal_fallback_only)
+    .await;
 
   let path = paths::config_path(&app)?;
   config_store::save_config(&path, &cfg)
@@ -118,6 +122,7 @@ pub fn run() {
           .level(log::LevelFilter::Info)
           .build(),
       )?;
+      app.handle().plugin(tauri_plugin_dialog::init())?;
 
       let cfg = load_or_default_config(&app.handle());
       let cfg0 = cfg.clone();
@@ -127,6 +132,10 @@ pub fn run() {
 
       let codex = CodexRuntime::new(&app.handle(), logs.clone());
       tauri::async_runtime::block_on(codex.set_workspace_dir(cfg0.codex.workspace_dir.clone()));
+      tauri::async_runtime::block_on(codex.set_universal_instructions(
+        cfg0.codex.universal_instructions.clone(),
+        cfg0.codex.universal_fallback_only,
+      ));
       let telegram = TelegramRuntime::new(cfg.clone(), codex.clone(), logs.clone());
 
       // Warm up Codex on startup so the UI doesn't look "stuck" and the first Telegram message is faster.
@@ -180,6 +189,9 @@ async fn codex_connect(state: State<'_, AppState>) -> Result<connectors::codex::
 
 #[tauri::command]
 async fn codex_stop(state: State<'_, AppState>) -> Result<(), String> {
+  state
+    .logs
+    .push(logbus::LogLevel::Warn, "codex", "codex_stop command invoked");
   state.codex.stop().await
 }
 

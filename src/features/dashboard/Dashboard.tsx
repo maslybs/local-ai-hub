@@ -29,17 +29,19 @@ export function Dashboard() {
 
   const refresh = React.useCallback(async () => {
     try {
-      const [nextCfg, token, tgStatus, codex] = await Promise.all([
+      const [nextCfg, token, tgStatus, codex] = await Promise.allSettled([
         backend.getConfig(),
         backend.telegramTokenStatus(),
         backend.telegramStatus(),
         backend.codexStatus(),
       ]);
-      setCfg(nextCfg);
-      setTokenStatus({ stored: Boolean(token?.stored), error: token?.error ?? null });
-      setTelegramRunning(Boolean(tgStatus?.running));
-      setTelegramStatus(tgStatus ?? null);
-      setCodexReady(Boolean(codex?.initialized));
+      if (nextCfg.status === 'fulfilled') setCfg(nextCfg.value);
+      if (token.status === 'fulfilled') setTokenStatus({ stored: Boolean(token.value?.stored), error: token.value?.error ?? null });
+      if (tgStatus.status === 'fulfilled') {
+        setTelegramRunning(Boolean(tgStatus.value?.running));
+        setTelegramStatus(tgStatus.value ?? null);
+      }
+      if (codex.status === 'fulfilled') setCodexReady(Boolean(codex.value?.initialized));
     } catch {
       // Non-tauri dev (browser) or backend not ready yet; keep UI usable.
     }

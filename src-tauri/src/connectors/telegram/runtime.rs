@@ -71,18 +71,6 @@ impl TelegramRuntime {
         .build()
         .expect("reqwest client");
 
-      // Warm up Codex in the background so the first user message feels faster.
-      {
-        let codex = runtime.inner.codex.clone();
-        let logs = runtime.inner.logs.clone();
-        tauri::async_runtime::spawn(async move {
-          logs.push(logbus::LogLevel::Info, "codex", "warmup connect");
-          if let Err(e) = codex.connect().await {
-            logs.push(logbus::LogLevel::Error, "codex", format!("warmup failed: {e}"));
-          }
-        });
-      }
-
       // get bot username
       match tg_get_me(&client, &token).await {
         Ok(username) => {
@@ -246,22 +234,38 @@ impl TelegramRuntime {
                           } else {
                             format!("Codex error: {e}")
                           };
-                          let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                          if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await {
+                            logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                          }
                           return;
                         }
                       };
 
+                      logs2.push(logbus::LogLevel::Info, "telegram", format!("codex stream started chat_id={chat_id}"));
+
                       let mut first_reply = true;
                       let mut sent_any = false;
+                      let mut updates_closed = false;
+                      let mut first_chunk_logged = false;
                       let mut done_rx = stream.done_rx;
                       loop {
                         tokio::select! {
-                          maybe = stream.updates_rx.recv() => {
-                            let Some(chunk) = maybe else { continue; };
+                          maybe = stream.updates_rx.recv(), if !updates_closed => {
+                            let Some(chunk) = maybe else {
+                              updates_closed = true;
+                              logs2.push(logbus::LogLevel::Warn, "telegram", format!("codex updates channel closed chat_id={chat_id}"));
+                              continue;
+                            };
                             let reply_to = if first_reply { Some(message_id) } else { None };
                             first_reply = false;
                             sent_any = true;
-                            let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                            if !first_chunk_logged {
+                              first_chunk_logged = true;
+                              logs2.push(logbus::LogLevel::Info, "telegram", format!("codex first chunk chat_id={chat_id}"));
+                            }
+                            if let Err(e) = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await {
+                              logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessage failed: {e}"));
+                            }
                           }
                           done = &mut done_rx => {
                             // Stop typing loader.
@@ -271,21 +275,47 @@ impl TelegramRuntime {
                               let reply_to = if first_reply { Some(message_id) } else { None };
                               first_reply = false;
                               sent_any = true;
-                              let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                              if let Err(e) = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await {
+                                logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessage failed: {e}"));
+                              }
                             }
 
                             match done {
                               Ok(Ok(final_text)) => {
-                                if !sent_any && !final_text.trim().is_empty() {
-                                  let _ = tg_send_message_series(&client2, &token2, chat_id, &final_text, Some(message_id)).await;
+                                logs2.push(logbus::LogLevel::Info, "telegram", format!("codex done ok chat_id={chat_id} chars={}", final_text.chars().count()));
+                                if !sent_any {
+                                  if final_text.trim().is_empty() {
+                                    let msg = "Нема відповіді від Codex. Спробуй ще раз.".to_string();
+                                    if let Err(e) = tg_send_message(&client2, &token2, chat_id, &msg, Some(message_id)).await {
+                                      logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessage failed: {e}"));
+                                    }
+                                  } else if let Err(e) =
+                                    tg_send_message_series(&client2, &token2, chat_id, &final_text, Some(message_id)).await
+                                  {
+                                    logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                                  }
                                 }
                               }
                               Ok(Err(e)) => {
+                                logs2.push(logbus::LogLevel::Warn, "telegram", format!("codex done err chat_id={chat_id}: {e}"));
                                 let msg = format!("Codex error: {e}");
-                                let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                                if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await {
+                                  logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                                }
                               }
                               Err(_) => {
-                                let _ = tg_send_message_series(&client2, &token2, chat_id, "Codex error: internal channel closed", Some(message_id)).await;
+                                logs2.push(logbus::LogLevel::Warn, "telegram", format!("codex done channel closed chat_id={chat_id}"));
+                                if let Err(e) = tg_send_message_series(
+                                  &client2,
+                                  &token2,
+                                  chat_id,
+                                  "Codex error: internal channel closed",
+                                  Some(message_id),
+                                )
+                                .await
+                                {
+                                  logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                                }
                               }
                             }
                             break;
@@ -337,22 +367,38 @@ impl TelegramRuntime {
                           } else {
                             format!("Codex error: {e}")
                           };
-                          let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                          if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await {
+                            logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                          }
                           return;
                         }
                       };
 
+                      logs2.push(logbus::LogLevel::Info, "telegram", format!("codex stream started chat_id={chat_id}"));
+
                       let mut first_reply = true;
                       let mut sent_any = false;
+                      let mut updates_closed = false;
+                      let mut first_chunk_logged = false;
                       let mut done_rx = stream.done_rx;
                       loop {
                         tokio::select! {
-                          maybe = stream.updates_rx.recv() => {
-                            let Some(chunk) = maybe else { continue; };
+                          maybe = stream.updates_rx.recv(), if !updates_closed => {
+                            let Some(chunk) = maybe else {
+                              updates_closed = true;
+                              logs2.push(logbus::LogLevel::Warn, "telegram", format!("codex updates channel closed chat_id={chat_id}"));
+                              continue;
+                            };
                             let reply_to = if first_reply { Some(message_id) } else { None };
                             first_reply = false;
                             sent_any = true;
-                            let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                            if !first_chunk_logged {
+                              first_chunk_logged = true;
+                              logs2.push(logbus::LogLevel::Info, "telegram", format!("codex first chunk chat_id={chat_id}"));
+                            }
+                            if let Err(e) = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await {
+                              logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessage failed: {e}"));
+                            }
                           }
                           done = &mut done_rx => {
                             let _ = typing_tx.send(true);
@@ -360,21 +406,47 @@ impl TelegramRuntime {
                               let reply_to = if first_reply { Some(message_id) } else { None };
                               first_reply = false;
                               sent_any = true;
-                              let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                              if let Err(e) = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await {
+                                logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessage failed: {e}"));
+                              }
                             }
 
                             match done {
                               Ok(Ok(final_text)) => {
-                                if !sent_any && !final_text.trim().is_empty() {
-                                  let _ = tg_send_message_series(&client2, &token2, chat_id, &final_text, Some(message_id)).await;
+                                logs2.push(logbus::LogLevel::Info, "telegram", format!("codex done ok chat_id={chat_id} chars={}", final_text.chars().count()));
+                                if !sent_any {
+                                  if final_text.trim().is_empty() {
+                                    let msg = "Нема відповіді від Codex. Спробуй ще раз.".to_string();
+                                    if let Err(e) = tg_send_message(&client2, &token2, chat_id, &msg, Some(message_id)).await {
+                                      logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessage failed: {e}"));
+                                    }
+                                  } else if let Err(e) =
+                                    tg_send_message_series(&client2, &token2, chat_id, &final_text, Some(message_id)).await
+                                  {
+                                    logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                                  }
                                 }
                               }
                               Ok(Err(e)) => {
+                                logs2.push(logbus::LogLevel::Warn, "telegram", format!("codex done err chat_id={chat_id}: {e}"));
                                 let msg = format!("Codex error: {e}");
-                                let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                                if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await {
+                                  logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                                }
                               }
                               Err(_) => {
-                                let _ = tg_send_message_series(&client2, &token2, chat_id, "Codex error: internal channel closed", Some(message_id)).await;
+                                logs2.push(logbus::LogLevel::Warn, "telegram", format!("codex done channel closed chat_id={chat_id}"));
+                                if let Err(e) = tg_send_message_series(
+                                  &client2,
+                                  &token2,
+                                  chat_id,
+                                  "Codex error: internal channel closed",
+                                  Some(message_id),
+                                )
+                                .await
+                                {
+                                  logs2.push(logbus::LogLevel::Warn, "telegram", format!("sendMessageSeries failed: {e}"));
+                                }
                               }
                             }
                             break;
@@ -570,12 +642,14 @@ pub(super) async fn tg_send_message(
   while !text.is_empty() {
     let chunk: String = text.chars().take(4096).collect();
     text = text.chars().skip(4096).collect();
-    let payload = serde_json::json!({
-      "chat_id": chat_id,
-      "text": chunk,
-      "reply_to_message_id": reply_to_message_id,
-      "disable_web_page_preview": true
-    });
+    // Don't send `reply_to_message_id: null` (Telegram can reject nulls on some fields).
+    let mut payload = serde_json::Map::new();
+    payload.insert("chat_id".to_string(), serde_json::json!(chat_id));
+    payload.insert("text".to_string(), serde_json::json!(chunk));
+    if let Some(reply_to_message_id) = reply_to_message_id {
+      payload.insert("reply_to_message_id".to_string(), serde_json::json!(reply_to_message_id));
+    }
+    payload.insert("disable_web_page_preview".to_string(), serde_json::json!(true));
     let resp = client
       .post(&url)
       .json(&payload)

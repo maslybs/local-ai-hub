@@ -3,14 +3,29 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { TelegramView } from './TelegramView';
+import type { AppConfig } from '@/lib/backend';
 
 type ConnectorsViewProps = {
   tokenStored: boolean;
   telegramRunning: boolean;
   allowedChatsCount: number;
+  config: AppConfig | null;
+  onConfigChange: (cfg: AppConfig) => Promise<void>;
+  onTelegramAction: (action: 'start' | 'stop') => Promise<void>;
+  onTelegramToken: (action: 'set' | 'delete', token?: string) => Promise<void>;
+  tokenError: string | null;
 };
 
-export function ConnectorsView({ tokenStored, telegramRunning, allowedChatsCount }: ConnectorsViewProps) {
+export function ConnectorsView({
+  tokenStored,
+  telegramRunning,
+  allowedChatsCount,
+  config,
+  onConfigChange,
+  onTelegramAction,
+  onTelegramToken,
+  tokenError,
+}: ConnectorsViewProps) {
   const [selected, setSelected] = React.useState<'telegram' | 'coming_soon'>('telegram');
   return (
     <div className="space-y-6">
@@ -67,6 +82,11 @@ export function ConnectorsView({ tokenStored, telegramRunning, allowedChatsCount
               tokenStored={tokenStored}
               telegramRunning={telegramRunning}
               allowedChatsCount={allowedChatsCount}
+              config={config}
+              onConfigChange={onConfigChange}
+              onTelegramAction={onTelegramAction}
+              onTelegramToken={onTelegramToken}
+              tokenError={tokenError}
             />
           )}
 

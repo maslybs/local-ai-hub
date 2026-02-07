@@ -1,0 +1,62 @@
+use std::{fs, path::PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenStorageMode {
+  Keychain,
+  File,
+}
+
+impl Default for TokenStorageMode {
+  fn default() -> Self {
+    Self::Keychain
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramConfig {
+  #[serde(default)]
+  pub allowed_chat_ids: Vec<i64>,
+  #[serde(default = "default_poll_timeout_sec")]
+  pub poll_timeout_sec: u64,
+  #[serde(default)]
+  pub token_storage: TokenStorageMode,
+}
+
+fn default_poll_timeout_sec() -> u64 {
+  20
+}
+
+impl Default for TelegramConfig {
+  fn default() -> Self {
+    Self {
+      allowed_chat_ids: vec![],
+      poll_timeout_sec: default_poll_timeout_sec(),
+      token_storage: TokenStorageMode::default(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppConfig {
+  #[serde(default)]
+  pub telegram: TelegramConfig,
+}
+
+pub fn load_config(path: &PathBuf) -> Result<AppConfig, String> {
+  if !path.exists() {
+    return Ok(AppConfig::default());
+  }
+  let raw = fs::read_to_string(path).map_err(|e| format!("read config failed: {e}"))?;
+  serde_json::from_str(&raw).map_err(|e| format!("parse config failed: {e}"))
+}
+
+pub fn save_config(path: &PathBuf, cfg: &AppConfig) -> Result<(), String> {
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent).map_err(|e| format!("create config dir failed: {e}"))?;
+  }
+  let raw = serde_json::to_string_pretty(cfg).map_err(|e| format!("serialize config failed: {e}"))?;
+  fs::write(path, raw).map_err(|e| format!("write config failed: {e}"))
+}

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Settings2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Dialog,
@@ -11,21 +12,51 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import type { AppConfig } from '@/lib/backend';
+import { Switch } from '@/components/ui/switch';
 
 type TelegramViewProps = {
   tokenStored: boolean;
   telegramRunning: boolean;
   allowedChatsCount: number;
+  config: AppConfig | null;
+  onConfigChange: (cfg: AppConfig) => Promise<void>;
+  onTelegramAction: (action: 'start' | 'stop') => Promise<void>;
+  onTelegramToken: (action: 'set' | 'delete', token?: string) => Promise<void>;
+  tokenError: string | null;
 };
 
-export function TelegramView({ tokenStored, telegramRunning, allowedChatsCount }: TelegramViewProps) {
+export function TelegramView({
+  tokenStored,
+  telegramRunning,
+  allowedChatsCount,
+  config,
+  onConfigChange,
+  onTelegramAction,
+  onTelegramToken,
+  tokenError,
+}: TelegramViewProps) {
+  const [tokenInput, setTokenInput] = React.useState('');
+  const [chatIdInput, setChatIdInput] = React.useState('');
+  const [pollTimeoutInput, setPollTimeoutInput] = React.useState<string>('');
+  const [err, setErr] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    const v = config?.telegram?.poll_timeout_sec;
+    if (typeof v === 'number') setPollTimeoutInput(String(v));
+  }, [config?.telegram?.poll_timeout_sec]);
+
+  const allowedIds = config?.telegram?.allowed_chat_ids ?? [];
+  const storageMode = config?.telegram?.token_storage ?? 'keychain';
+
   return (
     <div className="space-y-4">
-      <Card>
-        <CardHeader className="flex flex-row items-start justify-between space-y-0">
-          <div className="space-y-1">
-            <CardTitle>Telegram</CardTitle>
-            <CardDescription />
+      <div className="rounded-2xl border border-border/60 bg-card/70 backdrop-blur-xl shadow-sm overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border/50">
+          <div className="flex items-center gap-2">
+            <div className="text-base font-semibold">Telegram</div>
+            <Badge variant={telegramRunning ? 'success' : 'secondary'}>{telegramRunning ? 'On' : 'Off'}</Badge>
+            <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? 'Token set' : 'Token missing'}</Badge>
           </div>
 
           <Dialog>
@@ -43,80 +74,211 @@ export function TelegramView({ tokenStored, telegramRunning, allowedChatsCount }
                 </DialogDescription>
               </DialogHeader>
 
-              <div className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Токен</CardTitle>
-                    <CardDescription>Зберігається безпечно (згодом через системне сховище).</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="text-sm text-muted-foreground">
-                      Статус: <span className="text-foreground font-medium">{tokenStored ? 'збережено' : 'нема'}</span>
-                    </div>
-                    <Input placeholder="Вставте токен бота" />
-                    <div className="flex gap-2">
-                      <Button>Зберегти</Button>
-                      <Button variant="outline">Видалити</Button>
-                    </div>
-                  </CardContent>
-                </Card>
+              <div className="space-y-3">
+                {err && <div className="text-sm text-destructive">{err}</div>}
+                {!err && tokenError && <div className="text-sm text-destructive">{tokenError}</div>}
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Доступ</CardTitle>
-                    <CardDescription>Хто може користуватись ботом.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="text-sm text-muted-foreground">
-                      Поки що заглушка. Додамо зручне керування списком і команду `/whoami`.
-                    </div>
-                    <div className="flex gap-2">
-                      <Input placeholder="Додати chat_id (наприклад 123456789)" />
-                      <Button variant="outline">Додати</Button>
-                    </div>
-                  </CardContent>
-                </Card>
+                <div className="rounded-xl bg-muted/20 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">Токен</div>
+                    <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? 'Є' : 'Нема'}</Badge>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between">
+                    <div className="text-xs text-muted-foreground">Файл (fallback)</div>
+                    <Switch
+                      checked={storageMode === 'file'}
+                      onCheckedChange={async (checked) => {
+                        setErr(null);
+                        const next: AppConfig = config ?? {
+                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                        };
+                        next.telegram.token_storage = checked ? 'file' : 'keychain';
+                        try {
+                          await onConfigChange(next);
+                        } catch (e: any) {
+                          setErr(e?.message ?? String(e));
+                        }
+                      }}
+                      title="Менш безпечно"
+                    />
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <Input
+                      placeholder="Вставте токен бота"
+                      value={tokenInput}
+                      onChange={(e) => setTokenInput(e.target.value)}
+                    />
+                    <Button
+                      onClick={async () => {
+                        setErr(null);
+                        try {
+                          await onTelegramToken('set', tokenInput);
+                          setTokenInput('');
+                        } catch (e: any) {
+                          setErr(e?.message ?? String(e));
+                        }
+                      }}
+                    >
+                      Зберегти
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        setErr(null);
+                        try {
+                          await onTelegramToken('delete');
+                        } catch (e: any) {
+                          setErr(e?.message ?? String(e));
+                        }
+                      }}
+                    >
+                      Видалити
+                    </Button>
+                  </div>
+                </div>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Параметри</CardTitle>
-                    <CardDescription />
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <Input placeholder="Timeout (наприклад 20)" />
-                  </CardContent>
-                </Card>
+                <div className="rounded-xl bg-muted/20 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">Доступ</div>
+                    <Badge variant="outline">{allowedIds.length}</Badge>
+                  </div>
+                  <div className="mt-3 flex gap-2">
+                    <Input
+                      placeholder="chat_id"
+                      value={chatIdInput}
+                      onChange={(e) => setChatIdInput(e.target.value)}
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        setErr(null);
+                        const id = Number(chatIdInput.trim());
+                        if (!Number.isFinite(id)) {
+                          setErr('Невірний chat_id');
+                          return;
+                        }
+                        const next: AppConfig = config ?? {
+                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                        };
+                        const set = new Set(next.telegram.allowed_chat_ids ?? []);
+                        set.add(id);
+                        next.telegram.allowed_chat_ids = Array.from(set);
+                        try {
+                          await onConfigChange(next);
+                          setChatIdInput('');
+                        } catch (e: any) {
+                          setErr(e?.message ?? String(e));
+                        }
+                      }}
+                    >
+                      Додати
+                    </Button>
+                  </div>
+                  {allowedIds.length > 0 && (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {allowedIds.map((id) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className="text-xs rounded-md border px-2 py-1 text-muted-foreground hover:text-foreground hover:bg-muted"
+                          title="Remove"
+                          onClick={async () => {
+                            setErr(null);
+                            const next: AppConfig = config ?? {
+                              telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                            };
+                        next.telegram.allowed_chat_ids = (next.telegram.allowed_chat_ids ?? []).filter((x) => x !== id);
+                        try {
+                          await onConfigChange(next);
+                            } catch (e: any) {
+                              setErr(e?.message ?? String(e));
+                            }
+                          }}
+                        >
+                          {id}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl bg-muted/20 p-4">
+                  <div className="text-sm font-medium">Timeout</div>
+                  <div className="mt-3 flex gap-2">
+                    <Input
+                      placeholder="20"
+                      value={pollTimeoutInput}
+                      onChange={(e) => setPollTimeoutInput(e.target.value)}
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        setErr(null);
+                        const v = Number(pollTimeoutInput.trim());
+                        if (!Number.isFinite(v) || v <= 0) {
+                          setErr('Невірний timeout');
+                          return;
+                        }
+                        const next: AppConfig = config ?? {
+                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                        };
+                        next.telegram.poll_timeout_sec = Math.floor(v);
+                        try {
+                          await onConfigChange(next);
+                        } catch (e: any) {
+                          setErr(e?.message ?? String(e));
+                        }
+                      }}
+                    >
+                      Зберегти
+                    </Button>
+                  </div>
+                </div>
               </div>
             </DialogContent>
           </Dialog>
-        </CardHeader>
+        </div>
 
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-muted-foreground">
-            <div>
-              Статус:{' '}
-              <span className="text-foreground font-medium">{telegramRunning ? 'працює' : 'зупинено'}</span>
-            </div>
-            <div>
-              Токен:{' '}
-              <span className="text-foreground font-medium">{tokenStored ? 'є' : 'нема'}</span>
-            </div>
-            <div>
-              Доступ:{' '}
-              <span className="text-foreground font-medium">{allowedChatsCount}</span>
-            </div>
+        <div className="px-5 py-4 flex items-center justify-between gap-3">
+          <div className="text-sm text-muted-foreground">
+            Allowed: <span className="text-foreground font-medium">{allowedChatsCount}</span>
           </div>
-
           <div className="flex gap-2">
-            <Button variant="outline" disabled title="Недоступно в бета-версії">
+            <Button
+              variant="outline"
+              onClick={async () => {
+                setErr(null);
+                try {
+                  await onTelegramAction('start');
+                } catch (e: any) {
+                  setErr(e?.message ?? String(e));
+                }
+              }}
+            >
               Запустити
             </Button>
-            <Button variant="outline" disabled title="Недоступно в бета-версії">
+            <Button
+              variant="outline"
+              onClick={async () => {
+                setErr(null);
+                try {
+                  await onTelegramAction('stop');
+                } catch (e: any) {
+                  setErr(e?.message ?? String(e));
+                }
+              }}
+            >
               Зупинити
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+
+        {(err || tokenError) && (
+          <div className="px-5 pb-4 text-sm text-destructive">
+            {err ?? tokenError}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

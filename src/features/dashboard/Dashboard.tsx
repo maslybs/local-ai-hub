@@ -9,17 +9,43 @@ import { LogsJobsView } from './views/LogsJobsView';
 import { MemoryView } from './views/MemoryView';
 import { OverviewView } from './views/OverviewView';
 import { SkillsView } from './views/SkillsView';
+import { backend, type AppConfig } from '@/lib/backend';
 
 export function Dashboard() {
   const { theme, toggle: toggleTheme } = useTheme();
 
   const [view, setView] = React.useState<View>('overview');
 
-  // Stage 0: mock state placeholders. Will be replaced by real config + backend status later.
-  const [telegramRunning] = React.useState(false);
-  const [tokenStored] = React.useState(false);
-  const [allowedChatsCount] = React.useState(0);
+  const [cfg, setCfg] = React.useState<AppConfig | null>(null);
+  const [telegramRunning, setTelegramRunning] = React.useState(false);
+  const [tokenStatus, setTokenStatus] = React.useState<{ stored: boolean; error: string | null }>({
+    stored: false,
+    error: null,
+  });
   const [codexReady] = React.useState(false);
+
+  const allowedChatsCount = cfg?.telegram.allowed_chat_ids?.length ?? 0;
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const [nextCfg, token, tgStatus] = await Promise.all([
+        backend.getConfig(),
+        backend.telegramTokenStatus(),
+        backend.telegramStatus(),
+      ]);
+      setCfg(nextCfg);
+      setTokenStatus({ stored: Boolean(token?.stored), error: token?.error ?? null });
+      setTelegramRunning(Boolean(tgStatus?.running));
+    } catch {
+      // Non-tauri dev (browser) or backend not ready yet; keep UI usable.
+    }
+  }, []);
+
+  React.useEffect(() => {
+    refresh();
+    const id = window.setInterval(refresh, 1500);
+    return () => window.clearInterval(id);
+  }, [refresh]);
 
   return (
     <div className="flex h-screen app-ambient">
@@ -44,7 +70,7 @@ export function Dashboard() {
             {view === 'overview' && (
               <OverviewView
                 telegramRunning={telegramRunning}
-                tokenStored={tokenStored}
+                tokenStored={tokenStatus.stored}
                 allowedChatsCount={allowedChatsCount}
                 codexReady={codexReady}
                 onNavigate={setView}
@@ -55,9 +81,25 @@ export function Dashboard() {
 
             {view === 'connectors' && (
               <ConnectorsView
-                tokenStored={tokenStored}
+                tokenStored={tokenStatus.stored}
                 telegramRunning={telegramRunning}
                 allowedChatsCount={allowedChatsCount}
+                config={cfg}
+                onConfigChange={async (next) => {
+                  await backend.saveConfig(next);
+                  await refresh();
+                }}
+                onTelegramAction={async (action) => {
+                  if (action === 'start') await backend.telegramStart();
+                  if (action === 'stop') await backend.telegramStop();
+                  await refresh();
+                }}
+                onTelegramToken={async (action, token) => {
+                  if (action === 'set' && token) await backend.telegramSetToken(token);
+                  if (action === 'delete') await backend.telegramDeleteToken();
+                  await refresh();
+                }}
+                tokenError={tokenStatus.error}
               />
             )}
 

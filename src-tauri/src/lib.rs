@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::{
   connectors::telegram::runtime::TelegramRuntime,
+  connectors::codex::runtime::CodexRuntime,
   core::{config_store, paths, secrets},
 };
 
@@ -15,6 +16,7 @@ use crate::{
 struct AppState {
   config: Arc<RwLock<config_store::AppConfig>>,
   telegram: TelegramRuntime,
+  codex: CodexRuntime,
 }
 
 #[tauri::command]
@@ -97,15 +99,17 @@ pub fn run() {
 
       let cfg = load_or_default_config(&app.handle());
       let cfg = Arc::new(RwLock::new(cfg));
-      let telegram = TelegramRuntime::new(cfg.clone());
+      let codex = CodexRuntime::new();
+      let telegram = TelegramRuntime::new(cfg.clone(), codex.clone());
 
-      app.manage(AppState { config: cfg, telegram });
+      app.manage(AppState { config: cfg, telegram, codex });
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
       ping,
       get_config,
       save_config,
+      codex_status,
       telegram_token_status,
       telegram_set_token,
       telegram_delete_token,
@@ -115,4 +119,9 @@ pub fn run() {
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
+}
+
+#[tauri::command]
+async fn codex_status(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexStatus, String> {
+  Ok(state.codex.status().await)
 }

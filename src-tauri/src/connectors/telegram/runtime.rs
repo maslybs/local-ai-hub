@@ -6,6 +6,7 @@ use tauri::AppHandle;
 use tokio::sync::{watch, RwLock};
 
 use crate::core::{config_store::AppConfig, paths, secrets};
+use crate::connectors::codex::runtime::CodexRuntime;
 
 use super::types::{BotState, TelegramStatus};
 
@@ -18,15 +19,17 @@ struct Inner {
   status: RwLock<TelegramStatus>,
   stop_tx: RwLock<Option<watch::Sender<bool>>>,
   config: Arc<RwLock<AppConfig>>,
+  codex: CodexRuntime,
 }
 
 impl TelegramRuntime {
-  pub fn new(config: Arc<RwLock<AppConfig>>) -> Self {
+  pub fn new(config: Arc<RwLock<AppConfig>>, codex: CodexRuntime) -> Self {
     Self {
       inner: Arc::new(Inner {
         status: RwLock::new(TelegramStatus::default()),
         stop_tx: RwLock::new(None),
         config,
+        codex,
       }),
     }
   }
@@ -132,9 +135,52 @@ impl TelegramRuntime {
                       let _ = tg_send_message(&client, &token, chat_id, "Нема доступу. Використай /whoami і додай chat_id в allowlist.", Some(message_id)).await;
                     }
                   }
-                  // Placeholder for future commands
-                  Some(_) if rest.is_some() => {}
+                  Some("/codex") => {
+                    let allowed = cfg.telegram.allowed_chat_ids.contains(&chat_id);
+                    if !allowed {
+                      let _ = tg_send_message(&client, &token, chat_id, "Нема доступу. Використай /whoami і додай chat_id в allowlist.", Some(message_id)).await;
+                      continue;
+                    }
+                    let prompt = match rest {
+                      Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+                      _ => {
+                        let _ = tg_send_message(&client, &token, chat_id, "Напиши: /codex <повідомлення>", Some(message_id)).await;
+                        continue;
+                      }
+                    };
+
+                    let client2 = client.clone();
+                    let token2 = token.clone();
+                    let codex = runtime.inner.codex.clone();
+                    tauri::async_runtime::spawn(async move {
+                      let out = match codex.ask_text(chat_id, &prompt).await {
+                        Ok(s) => s,
+                        Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
+                        Err(e) => format!("Codex error: {e}"),
+                      };
+                      let _ = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await;
+                    });
+                  }
                   _ => {}
+                }
+
+                // For allowlisted chats: treat any non-command message as Codex input.
+                if cmd.is_none() {
+                  let allowed = cfg.telegram.allowed_chat_ids.contains(&chat_id);
+                  if allowed {
+                    let prompt = trimmed.to_string();
+                    let client2 = client.clone();
+                    let token2 = token.clone();
+                    let codex = runtime.inner.codex.clone();
+                    tauri::async_runtime::spawn(async move {
+                      let out = match codex.ask_text(chat_id, &prompt).await {
+                        Ok(s) => s,
+                        Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
+                        Err(e) => format!("Codex error: {e}"),
+                      };
+                      let _ = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await;
+                    });
+                  }
                 }
               }
             }

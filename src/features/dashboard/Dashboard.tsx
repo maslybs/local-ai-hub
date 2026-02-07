@@ -22,20 +22,22 @@ export function Dashboard() {
     stored: false,
     error: null,
   });
-  const [codexReady] = React.useState(false);
+  const [codexReady, setCodexReady] = React.useState(false);
 
   const allowedChatsCount = cfg?.telegram.allowed_chat_ids?.length ?? 0;
 
   const refresh = React.useCallback(async () => {
     try {
-      const [nextCfg, token, tgStatus] = await Promise.all([
+      const [nextCfg, token, tgStatus, codex] = await Promise.all([
         backend.getConfig(),
         backend.telegramTokenStatus(),
         backend.telegramStatus(),
+        backend.codexStatus(),
       ]);
       setCfg(nextCfg);
       setTokenStatus({ stored: Boolean(token?.stored), error: token?.error ?? null });
       setTelegramRunning(Boolean(tgStatus?.running));
+      setCodexReady(Boolean(codex?.initialized));
     } catch {
       // Non-tauri dev (browser) or backend not ready yet; keep UI usable.
     }

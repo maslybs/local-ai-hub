@@ -31,6 +31,13 @@ export type TelegramStatus = {
 export type SecretStatus = {
   stored: boolean;
   error: string | null;
+  mode: 'keychain' | 'file';
+};
+
+export type CodexStatus = {
+  running: boolean;
+  initialized: boolean;
+  last_error: string | null;
 };
 
 export const backend = {
@@ -82,5 +89,10 @@ export const backend = {
   async telegramStatus(): Promise<TelegramStatus> {
     const invoke = await getInvoke();
     return invoke<TelegramStatus>('telegram_status');
+  },
+
+  async codexStatus(): Promise<CodexStatus> {
+    const invoke = await getInvoke();
+    return invoke<CodexStatus>('codex_status');
   },
 };

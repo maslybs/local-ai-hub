@@ -211,18 +211,23 @@ impl TelegramRuntime {
                     let client2 = client.clone();
                     let token2 = token.clone();
                     let codex = runtime.inner.codex.clone();
+                    let logs2 = runtime.inner.logs.clone();
                     runtime.inner.logs.push(logbus::LogLevel::Info, "telegram", format!("codex request chat_id={chat_id}"));
                     tauri::async_runtime::spawn(async move {
                       let (typing_tx, mut typing_rx) = watch::channel(false);
                       // Standard Telegram loader while Codex works.
                       let client3 = client2.clone();
                       let token3 = token2.clone();
+                      let logs3 = logs2.clone();
                       tauri::async_runtime::spawn(async move {
                         loop {
                           if *typing_rx.borrow() {
                             break;
                           }
-                          let _ = tg_send_chat_action(&client3, &token3, chat_id, "typing").await;
+                          if let Err(e) = tg_send_chat_action(&client3, &token3, chat_id, "typing").await {
+                            logs3.push(logbus::LogLevel::Warn, "telegram", format!("sendChatAction failed: {e}"));
+                            break;
+                          }
                           tokio::select! {
                             _ = typing_rx.changed() => break,
                             _ = tokio::time::sleep(Duration::from_secs(4)) => {}
@@ -230,15 +235,60 @@ impl TelegramRuntime {
                         }
                       });
 
-                      let out = match codex.ask_text(chat_id, &prompt).await {
+                      let mut stream = match codex.start_turn_stream(chat_id, &prompt).await {
                         Ok(s) => s,
-                        Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
-                        Err(e) => format!("Codex error: {e}"),
+                        Err(e) => {
+                          let _ = typing_tx.send(true);
+                          let msg = if e == "Busy" {
+                            "Зачекай: обробляю попереднє повідомлення.".to_string()
+                          } else {
+                            format!("Codex error: {e}")
+                          };
+                          let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                          return;
+                        }
                       };
-                      let _ = typing_tx.send(true);
 
-                      if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &out, Some(message_id)).await {
-                        log::info!("telegram: send codex reply failed: {e}");
+                      let mut first_reply = true;
+                      let mut sent_any = false;
+                      let mut done_rx = stream.done_rx;
+                      loop {
+                        tokio::select! {
+                          maybe = stream.updates_rx.recv() => {
+                            let Some(chunk) = maybe else { continue; };
+                            let reply_to = if first_reply { Some(message_id) } else { None };
+                            first_reply = false;
+                            sent_any = true;
+                            let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                          }
+                          done = &mut done_rx => {
+                            // Stop typing loader.
+                            let _ = typing_tx.send(true);
+                            // Drain any chunks that were queued before completion.
+                            while let Ok(chunk) = stream.updates_rx.try_recv() {
+                              let reply_to = if first_reply { Some(message_id) } else { None };
+                              first_reply = false;
+                              sent_any = true;
+                              let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                            }
+
+                            match done {
+                              Ok(Ok(final_text)) => {
+                                if !sent_any && !final_text.trim().is_empty() {
+                                  let _ = tg_send_message_series(&client2, &token2, chat_id, &final_text, Some(message_id)).await;
+                                }
+                              }
+                              Ok(Err(e)) => {
+                                let msg = format!("Codex error: {e}");
+                                let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                              }
+                              Err(_) => {
+                                let _ = tg_send_message_series(&client2, &token2, chat_id, "Codex error: internal channel closed", Some(message_id)).await;
+                              }
+                            }
+                            break;
+                          }
+                        }
                       }
                     });
                   }
@@ -253,17 +303,22 @@ impl TelegramRuntime {
                     let client2 = client.clone();
                     let token2 = token.clone();
                     let codex = runtime.inner.codex.clone();
+                    let logs2 = runtime.inner.logs.clone();
                     runtime.inner.logs.push(logbus::LogLevel::Info, "telegram", format!("codex request chat_id={chat_id}"));
                     tauri::async_runtime::spawn(async move {
                       let (typing_tx, mut typing_rx) = watch::channel(false);
                       let client3 = client2.clone();
                       let token3 = token2.clone();
+                      let logs3 = logs2.clone();
                       tauri::async_runtime::spawn(async move {
                         loop {
                           if *typing_rx.borrow() {
                             break;
                           }
-                          let _ = tg_send_chat_action(&client3, &token3, chat_id, "typing").await;
+                          if let Err(e) = tg_send_chat_action(&client3, &token3, chat_id, "typing").await {
+                            logs3.push(logbus::LogLevel::Warn, "telegram", format!("sendChatAction failed: {e}"));
+                            break;
+                          }
                           tokio::select! {
                             _ = typing_rx.changed() => break,
                             _ = tokio::time::sleep(Duration::from_secs(4)) => {}
@@ -271,15 +326,58 @@ impl TelegramRuntime {
                         }
                       });
 
-                      let out = match codex.ask_text(chat_id, &prompt).await {
+                      let mut stream = match codex.start_turn_stream(chat_id, &prompt).await {
                         Ok(s) => s,
-                        Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
-                        Err(e) => format!("Codex error: {e}"),
+                        Err(e) => {
+                          let _ = typing_tx.send(true);
+                          let msg = if e == "Busy" {
+                            "Зачекай: обробляю попереднє повідомлення.".to_string()
+                          } else {
+                            format!("Codex error: {e}")
+                          };
+                          let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                          return;
+                        }
                       };
-                      let _ = typing_tx.send(true);
 
-                      if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &out, Some(message_id)).await {
-                        log::info!("telegram: send codex reply failed: {e}");
+                      let mut first_reply = true;
+                      let mut sent_any = false;
+                      let mut done_rx = stream.done_rx;
+                      loop {
+                        tokio::select! {
+                          maybe = stream.updates_rx.recv() => {
+                            let Some(chunk) = maybe else { continue; };
+                            let reply_to = if first_reply { Some(message_id) } else { None };
+                            first_reply = false;
+                            sent_any = true;
+                            let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                          }
+                          done = &mut done_rx => {
+                            let _ = typing_tx.send(true);
+                            while let Ok(chunk) = stream.updates_rx.try_recv() {
+                              let reply_to = if first_reply { Some(message_id) } else { None };
+                              first_reply = false;
+                              sent_any = true;
+                              let _ = tg_send_message(&client2, &token2, chat_id, &chunk, reply_to).await;
+                            }
+
+                            match done {
+                              Ok(Ok(final_text)) => {
+                                if !sent_any && !final_text.trim().is_empty() {
+                                  let _ = tg_send_message_series(&client2, &token2, chat_id, &final_text, Some(message_id)).await;
+                                }
+                              }
+                              Ok(Err(e)) => {
+                                let msg = format!("Codex error: {e}");
+                                let _ = tg_send_message_series(&client2, &token2, chat_id, &msg, Some(message_id)).await;
+                              }
+                              Err(_) => {
+                                let _ = tg_send_message_series(&client2, &token2, chat_id, "Codex error: internal channel closed", Some(message_id)).await;
+                              }
+                            }
+                            break;
+                          }
+                        }
                       }
                     });
                   }

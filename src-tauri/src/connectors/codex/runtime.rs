@@ -15,7 +15,7 @@ use tauri::AppHandle;
 use tokio::{
   io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
   process::{Child, ChildStdin, Command},
-  sync::{oneshot, Mutex, RwLock},
+  sync::{mpsc, oneshot, Mutex, RwLock},
 };
 
 use super::types::CodexStatus;
@@ -24,6 +24,11 @@ use crate::core::{logbus, paths};
 #[derive(Clone)]
 pub struct CodexRuntime {
   inner: Arc<Inner>,
+}
+
+pub struct CodexStream {
+  pub updates_rx: mpsc::UnboundedReceiver<String>,
+  pub done_rx: oneshot::Receiver<Result<String, String>>,
 }
 
 struct Inner {
@@ -38,17 +43,23 @@ struct Inner {
   busy_chats: Mutex<HashSet<i64>>,
   chat_threads_path: Option<PathBuf>,
   logs: logbus::LogBus,
+  default_cwd: Option<String>,
 }
 
 struct PendingTurn {
   chat_id: i64,
-  agent_messages: Vec<String>,
-  done: oneshot::Sender<Result<Vec<String>, String>>,
+  full_text: String,
+  sent_byte: usize,
+  updates_tx: mpsc::UnboundedSender<String>,
+  done: oneshot::Sender<Result<String, String>>,
 }
 
 impl CodexRuntime {
   pub fn new(app: &AppHandle, logs: logbus::LogBus) -> Self {
     let (chat_threads_path, chat_threads) = load_chat_threads(app);
+    let default_cwd = std::env::current_dir()
+      .ok()
+      .and_then(|p| p.to_str().map(|s| s.to_string()));
     Self {
       inner: Arc::new(Inner {
         status: RwLock::new(CodexStatus::default()),
@@ -62,6 +73,7 @@ impl CodexRuntime {
         busy_chats: Mutex::new(HashSet::new()),
         chat_threads_path,
         logs,
+        default_cwd,
       }),
     }
   }
@@ -206,6 +218,7 @@ impl CodexRuntime {
     let params = serde_json::json!({
       "clientInfo": {
         "name": "local-ai-hub",
+        "title": "Local AI Hub",
         "version": env!("CARGO_PKG_VERSION"),
       }
     });
@@ -218,7 +231,7 @@ impl CodexRuntime {
     Ok(())
   }
 
-  pub async fn ask_text(&self, chat_id: i64, text: &str) -> Result<String, String> {
+  pub async fn start_turn_stream(&self, chat_id: i64, text: &str) -> Result<CodexStream, String> {
     let text = text.trim();
     if text.is_empty() {
       return Err("Empty message".to_string());
@@ -232,14 +245,16 @@ impl CodexRuntime {
       busy.insert(chat_id);
     }
 
-    let res = self.ask_text_inner(chat_id, text).await;
-
-    let mut busy = self.inner.busy_chats.lock().await;
-    busy.remove(&chat_id);
-    res
+    // If anything fails before we register the turn, make sure we clear the busy flag.
+    let started = self.start_turn_stream_inner(chat_id, text).await;
+    if started.is_err() {
+      let mut busy = self.inner.busy_chats.lock().await;
+      busy.remove(&chat_id);
+    }
+    started
   }
 
-  async fn ask_text_inner(&self, chat_id: i64, text: &str) -> Result<String, String> {
+  async fn start_turn_stream_inner(&self, chat_id: i64, text: &str) -> Result<CodexStream, String> {
     self.ensure_initialized().await?;
 
     let thread_id = self.thread_for_chat(chat_id).await?;
@@ -248,13 +263,16 @@ impl CodexRuntime {
       .logs
       .push(logbus::LogLevel::Info, "codex", format!("turn/start chat_id={chat_id}"));
 
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
       "threadId": thread_id,
       "approvalPolicy": "never",
       "input": [
         { "type": "text", "text": text }
       ]
     });
+    if let Some(cwd) = self.inner.default_cwd.clone() {
+      params["cwd"] = Value::String(cwd);
+    }
     let turn_start = self.send_request("turn/start", params).await?;
     let turn_id = turn_start
       .get("turn")
@@ -263,31 +281,54 @@ impl CodexRuntime {
       .ok_or_else(|| "turn/start response missing turn.id".to_string())?
       .to_string();
 
-    let (tx, rx) = oneshot::channel::<Result<Vec<String>, String>>();
+    let (updates_tx, updates_rx) = mpsc::unbounded_channel::<String>();
+    let (done_tx, done_rx) = oneshot::channel::<Result<String, String>>();
+
     {
       let mut turns = self.inner.pending_turns.lock().await;
       turns.insert(
         turn_id.clone(),
         PendingTurn {
           chat_id,
-          agent_messages: vec![],
-          done: tx,
+          full_text: String::new(),
+          sent_byte: 0,
+          updates_tx,
+          done: done_tx,
         },
       );
     }
 
-    let done = match tokio::time::timeout(Duration::from_secs(180), rx).await {
-      Ok(v) => v.map_err(|_| "Codex internal channel closed".to_string())?,
-      Err(_) => {
-        let mut turns = self.inner.pending_turns.lock().await;
-        turns.remove(&turn_id);
-        return Err("Codex timeout".to_string());
+    // Safety timeout: if we never get turn/completed, fail the turn so callers can stop waiting.
+    let inner = self.inner.clone();
+    tauri::async_runtime::spawn(async move {
+      tokio::time::sleep(Duration::from_secs(180)).await;
+      let mut turns = inner.pending_turns.lock().await;
+      if let Some(p) = turns.remove(&turn_id) {
+        {
+          let mut busy = inner.busy_chats.lock().await;
+          busy.remove(&p.chat_id);
+        }
+        let _ = p.done.send(Err("Codex timeout".to_string()));
       }
-    };
+    });
 
-    let msgs = done?;
-    let last = msgs.into_iter().filter(|s| !s.trim().is_empty()).last();
-    Ok(last.unwrap_or_else(|| "Empty response".to_string()))
+    Ok(CodexStream { updates_rx, done_rx })
+  }
+
+  pub async fn ask_text(&self, chat_id: i64, text: &str) -> Result<String, String> {
+    let CodexStream {
+      mut updates_rx,
+      done_rx,
+    } = self.start_turn_stream(chat_id, text).await?;
+
+    // Drain streaming updates so the channel doesn't grow unbounded if someone calls ask_text.
+    tauri::async_runtime::spawn(async move {
+      while let Some(_chunk) = updates_rx.recv().await {}
+    });
+
+    done_rx
+      .await
+      .map_err(|_| "Codex internal channel closed".to_string())?
   }
 
   async fn thread_for_chat(&self, chat_id: i64) -> Result<String, String> {
@@ -300,10 +341,13 @@ impl CodexRuntime {
       .inner
       .logs
       .push(logbus::LogLevel::Info, "codex", format!("thread/start chat_id={chat_id}"));
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
       "approvalPolicy": "never",
       "sandbox": "read-only"
     });
+    if let Some(cwd) = self.inner.default_cwd.clone() {
+      params["cwd"] = Value::String(cwd);
+    }
     let res = self.send_request("thread/start", params).await?;
     let thread_id = res
       .get("thread")
@@ -334,11 +378,14 @@ impl CodexRuntime {
       .logs
       .push(logbus::LogLevel::Info, "codex", format!("thread/resume thread_id={}", thread_id));
     // Resume is required after server restart to load the stored thread context.
-    let params = serde_json::json!({
+    let mut params = serde_json::json!({
       "threadId": thread_id,
       "approvalPolicy": "never",
       "sandbox": "read-only"
     });
+    if let Some(cwd) = self.inner.default_cwd.clone() {
+      params["cwd"] = Value::String(cwd);
+    }
     let _ = self.send_request("thread/resume", params).await?;
 
     let mut resumed = self.inner.resumed_threads.lock().await;
@@ -458,6 +505,21 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
         st.last_error = Some(err.unwrap_or_else(|| "Login failed".to_string()));
       }
     }
+    "item/agentMessage/delta" => {
+      let turn_id = params.get("turnId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+      if turn_id.is_empty() {
+        return;
+      }
+      let delta = params.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+      if delta.is_empty() {
+        return;
+      }
+      let mut turns = inner.pending_turns.lock().await;
+      if let Some(p) = turns.get_mut(&turn_id) {
+        p.full_text.push_str(delta);
+        flush_turn_chunks(p, false);
+      }
+    }
     "item/completed" => {
       let turn_id = params.get("turnId").and_then(|v| v.as_str()).unwrap_or("").to_string();
       if turn_id.is_empty() {
@@ -468,7 +530,12 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
         if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
           let mut turns = inner.pending_turns.lock().await;
           if let Some(p) = turns.get_mut(&turn_id) {
-            p.agent_messages.push(text.to_string());
+            // item/completed contains the full text for this agent message.
+            // Prefer it over deltas (it can be more complete).
+            if text.len() >= p.full_text.len() {
+              p.full_text = text.to_string();
+            }
+            flush_turn_chunks(p, false);
           }
         }
       }
@@ -488,7 +555,8 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
         .map(|s| s.to_string());
 
       let mut turns = inner.pending_turns.lock().await;
-      if let Some(p) = turns.remove(&turn_id) {
+      if let Some(mut p) = turns.remove(&turn_id) {
+        flush_turn_chunks(&mut p, true);
         // clear per-chat busy state even if we fail to send back on the channel
         {
           let mut busy = inner.busy_chats.lock().await;
@@ -498,7 +566,7 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
         if status == "failed" {
           let _ = p.done.send(Err(err_msg.unwrap_or_else(|| "Turn failed".to_string())));
         } else {
-          let _ = p.done.send(Ok(p.agent_messages));
+          let _ = p.done.send(Ok(p.full_text));
         }
       }
     }
@@ -508,6 +576,110 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
     }
     _ => {}
   }
+}
+
+fn flush_turn_chunks(p: &mut PendingTurn, force: bool) {
+  // Send in "a few sentences/paragraphs" chunks to clients (e.g. Telegram).
+  // When not forced, wait until we have enough text to avoid spamming.
+  loop {
+    let start = p.sent_byte.min(p.full_text.len());
+    if start >= p.full_text.len() {
+      break;
+    }
+
+    let rem = &p.full_text[start..];
+    if rem.trim().is_empty() {
+      break;
+    }
+
+    if !force {
+      let window_end = byte_index_at_char(rem, 900);
+      let window = &rem[..window_end];
+      let has_para_break = window.contains("\n\n");
+      let enough = window.chars().count() >= 180;
+      if !has_para_break && !enough {
+        break;
+      }
+    }
+
+    let min_chars = if force { 1 } else { 80 };
+    let Some((new_start, chunk)) = take_stream_chunk(&p.full_text, p.sent_byte, 900, min_chars) else {
+      break;
+    };
+
+    if chunk.trim().is_empty() {
+      p.sent_byte = new_start.min(p.full_text.len());
+      continue;
+    }
+
+    let _ = p.updates_tx.send(chunk);
+    p.sent_byte = new_start.min(p.full_text.len());
+  }
+}
+
+fn byte_index_at_char(s: &str, max_chars: usize) -> usize {
+  if max_chars == 0 {
+    return 0;
+  }
+  let mut count = 0usize;
+  for (i, _) in s.char_indices() {
+    if count == max_chars {
+      return i;
+    }
+    count += 1;
+  }
+  s.len()
+}
+
+fn take_stream_chunk(full: &str, start_byte: usize, max_chars: usize, min_chars: usize) -> Option<(usize, String)> {
+  if start_byte >= full.len() {
+    return None;
+  }
+  let rem = &full[start_byte..];
+  if rem.trim().is_empty() {
+    return None;
+  }
+
+  let end_byte = byte_index_at_char(rem, max_chars);
+  let window = &rem[..end_byte];
+
+  let (cut_byte, chunk_text) = if end_byte >= rem.len() {
+    (rem.len(), rem.trim().to_string())
+  } else if let Some(idx) = window.rfind("\n\n") {
+    let raw = &rem[..idx];
+    (idx + 2, raw.trim().to_string())
+  } else {
+    // Try to end on sentence boundary within the window.
+    let mut cut = None;
+    for (i, ch) in window.char_indices().rev() {
+      if ch == '.' || ch == '!' || ch == '?' || ch == '\n' {
+        if i > 120 {
+          cut = Some(i + ch.len_utf8());
+          break;
+        }
+      }
+    }
+    let cut = cut.unwrap_or(end_byte);
+    let raw = &rem[..cut];
+    (cut, raw.trim().to_string())
+  };
+
+  if chunk_text.chars().count() < min_chars {
+    return None;
+  }
+
+  // Advance, skipping whitespace so we don't get stuck on empty prefixes.
+  let mut new_start = start_byte + cut_byte;
+  while new_start < full.len() {
+    let ch = full[new_start..].chars().next()?;
+    if ch.is_whitespace() {
+      new_start += ch.len_utf8();
+      continue;
+    }
+    break;
+  }
+
+  Some((new_start, chunk_text))
 }
 
 fn load_chat_threads(app: &AppHandle) -> (Option<PathBuf>, HashMap<i64, String>) {

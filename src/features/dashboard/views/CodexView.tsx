@@ -68,7 +68,11 @@ export function CodexView({ codexReady }: CodexViewProps) {
               setBusy(true);
               setErr(null);
               try {
-                const st = await backend.codexConnect();
+                // If already ready, do a real reconnect (stop + connect).
+                // "Connect" alone is idempotent and won't recover a wedged process.
+                const st = ready
+                  ? (await backend.codexStop(), await backend.codexConnect())
+                  : await backend.codexConnect();
                 setStatus(st);
               } catch (e: any) {
                 setErr(e?.message ?? String(e));
@@ -76,9 +80,9 @@ export function CodexView({ codexReady }: CodexViewProps) {
                 setBusy(false);
               }
             }}
-            title={ready ? 'Підключено' : 'Підключити Codex'}
+            title={ready ? 'Перепідключити Codex' : 'Підключити Codex'}
           >
-            {ready ? 'Підключено' : busy ? '...' : 'Підключити'}
+            {busy ? '...' : ready ? 'Перепідключити' : 'Підключити'}
           </Button>
 
           <Dialog>
@@ -230,50 +234,12 @@ export function CodexView({ codexReady }: CodexViewProps) {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-border/50">
-        <section className="p-5 space-y-3">
-          <div className="text-sm font-medium">Статус</div>
+      {(err || lastError) && (
+        <div className="px-5 py-3">
           {err && <div className="text-sm text-destructive">{err}</div>}
           {!err && lastError && <div className="text-sm text-destructive">{lastError}</div>}
-          <div className="text-sm text-muted-foreground space-y-1">
-            <div>
-              Готово: <span className="text-foreground font-medium">{ready ? 'так' : 'ні'}</span>
-            </div>
-            <div>
-              Акаунт: <span className="text-foreground font-medium">{authMode ?? 'нема'}</span>
-            </div>
-          </div>
-          <div className="pt-1 flex gap-2">
-            <Button
-              variant="outline"
-              disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                setErr(null);
-                try {
-                  await backend.codexStop();
-                  const st = await backend.codexConnect();
-                  setStatus(st);
-                } catch (e: any) {
-                  setErr(e?.message ?? String(e));
-                } finally {
-                  setBusy(false);
-                }
-              }}
-              title="Перезапустити Codex"
-            >
-              Restart
-            </Button>
-          </div>
-        </section>
-
-        <section className="p-5 space-y-3">
-          <div className="text-sm font-medium">Діалог</div>
-          <div className="rounded-xl bg-muted/20 p-4 text-sm text-muted-foreground min-h-28">
-            Недоступно в бета-версії.
-          </div>
-        </section>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

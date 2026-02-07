@@ -1,4 +1,5 @@
 import React from 'react';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { CodexView } from './CodexView';
@@ -13,9 +14,6 @@ export function AiCoreView({ codexReady }: AiCoreViewProps) {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold">AI Core</h2>
-        <p className="text-muted-foreground">
-          Центральний розділ з AI. Тут з часом зʼявляться інші моделі, але починаємо з Codex.
-        </p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
@@ -24,26 +22,22 @@ export function AiCoreView({ codexReady }: AiCoreViewProps) {
             <CardTitle>AI</CardTitle>
             <CardDescription />
           </CardHeader>
-          <CardContent className="space-y-2">
+          <CardContent className="space-y-1">
             <button
               type="button"
               onClick={() => setSelected('codex')}
               className={cn(
-                'w-full rounded-lg border p-3 text-left transition-colors',
-                selected === 'codex' ? 'bg-muted' : 'hover:bg-muted/60'
+                'w-full rounded-lg px-3 py-3 text-left transition-colors',
+                selected === 'codex'
+                  ? 'bg-primary/10 text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
               )}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center justify-between gap-3">
                 <div className="font-medium">Codex</div>
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                Основний AI-помічник для роботи з вашим проєктом.
-              </div>
-              <div className="mt-2 text-xs text-muted-foreground">
-                Статус:{' '}
-                <span className="text-foreground font-medium">
-                  {codexReady ? 'готово' : 'не налаштовано'}
-                </span>
+                <Badge variant={codexReady ? 'success' : 'warning'}>
+                  {codexReady ? 'Ready' : 'Setup'}
+                </Badge>
               </div>
             </button>
 
@@ -51,15 +45,15 @@ export function AiCoreView({ codexReady }: AiCoreViewProps) {
               type="button"
               onClick={() => setSelected('coming_soon')}
               className={cn(
-                'w-full rounded-lg border p-3 text-left transition-colors',
-                selected === 'coming_soon' ? 'bg-muted' : 'hover:bg-muted/60'
+                'w-full rounded-lg px-3 py-3 text-left transition-colors',
+                selected === 'coming_soon'
+                  ? 'bg-muted/40 text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
               )}
             >
-              <div className="flex items-center gap-2">
-                <div className="font-medium">Додати AI</div>
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                Недоступно в бета-версії.
+              <div className="flex items-center justify-between gap-3">
+                <div className="font-medium">Add AI</div>
+                <Badge variant="secondary">Beta</Badge>
               </div>
             </button>
           </CardContent>
@@ -71,7 +65,7 @@ export function AiCoreView({ codexReady }: AiCoreViewProps) {
             <Card>
               <CardHeader>
                 <CardTitle>Інші AI</CardTitle>
-                <CardDescription>Недоступно в бета-версії.</CardDescription>
+                <CardDescription />
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
                 Недоступно в бета-версії.

@@ -3,10 +3,12 @@ import { DashboardHeader } from './components/DashboardHeader';
 import { Sidebar } from './components/Sidebar';
 import { useTheme } from './hooks/useTheme';
 import { View } from './types';
-import { CodexView } from './views/CodexView';
+import { AiCoreView } from './views/AiCoreView';
+import { ConnectorsView } from './views/ConnectorsView';
 import { LogsJobsView } from './views/LogsJobsView';
+import { MemoryView } from './views/MemoryView';
 import { OverviewView } from './views/OverviewView';
-import { TelegramView } from './views/TelegramView';
+import { SkillsView } from './views/SkillsView';
 
 export function Dashboard() {
   const { theme, toggle: toggleTheme } = useTheme();
@@ -33,6 +35,8 @@ export function Dashboard() {
           view={view}
           theme={theme}
           onThemeToggle={toggleTheme}
+          onOpenLogs={() => setView(v => (v === 'logs' ? 'overview' : 'logs'))}
+          logsOpen={view === 'logs'}
           telegramRunning={telegramRunning}
           tokenStored={tokenStored}
           codexReady={codexReady}
@@ -50,11 +54,19 @@ export function Dashboard() {
               />
             )}
 
-            {view === 'telegram' && (
-              <TelegramView tokenStored={tokenStored} telegramRunning={telegramRunning} />
+            {view === 'ai_core' && <AiCoreView codexReady={codexReady} />}
+
+            {view === 'connectors' && (
+              <ConnectorsView
+                tokenStored={tokenStored}
+                telegramRunning={telegramRunning}
+                allowedChatsCount={allowedChatsCount}
+              />
             )}
 
-            {view === 'codex' && <CodexView codexReady={codexReady} />}
+            {view === 'skills' && <SkillsView />}
+
+            {view === 'memory' && <MemoryView />}
 
             {view === 'logs' && <LogsJobsView />}
           </div>
@@ -63,4 +75,3 @@ export function Dashboard() {
     </div>
   );
 }
-

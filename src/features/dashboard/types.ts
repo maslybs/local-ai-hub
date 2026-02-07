@@ -1,2 +1,1 @@
-export type View = 'overview' | 'telegram' | 'codex' | 'logs';
-
+export type View = 'overview' | 'ai_core' | 'connectors' | 'skills' | 'memory' | 'logs';

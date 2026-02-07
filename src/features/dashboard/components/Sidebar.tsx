@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileText, LayoutDashboard, MessageCircle, Settings, TerminalSquare } from 'lucide-react';
+import { BrainCircuit, Cable, Database, LayoutDashboard, Settings, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { View } from '../types';
 import { StatusIndicator } from './StatusIndicator';
@@ -19,9 +19,10 @@ export function Sidebar({ view, onViewChange, telegramRunning, codexReady }: Sid
     status?: boolean;
   }> = [
     { id: 'overview', icon: LayoutDashboard, label: 'Overview' },
-    { id: 'telegram', icon: MessageCircle, label: 'Telegram', status: telegramRunning },
-    { id: 'codex', icon: TerminalSquare, label: 'Codex', status: codexReady },
-    { id: 'logs', icon: FileText, label: 'Logs/Jobs' },
+    { id: 'ai_core', icon: BrainCircuit, label: 'AI Core', status: codexReady },
+    { id: 'connectors', icon: Cable, label: 'Connectors', status: telegramRunning },
+    { id: 'skills', icon: Sparkles, label: 'Skills' },
+    { id: 'memory', icon: Database, label: 'Memory' },
   ];
 
   return (
@@ -65,4 +66,3 @@ export function Sidebar({ view, onViewChange, telegramRunning, codexReady }: Sid
     </aside>
   );
 }
-

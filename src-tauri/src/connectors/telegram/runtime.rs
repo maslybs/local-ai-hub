@@ -565,7 +565,7 @@ pub(super) async fn tg_send_message(
   reply_to_message_id: Option<i64>,
 ) -> Result<(), String> {
   let url = format!("https://api.telegram.org/bot{token}/sendMessage");
-  let mut text = text.to_string();
+  let mut text = format_for_telegram(text);
   // Telegram limit is 4096 chars; chunk when needed.
   while !text.is_empty() {
     let chunk: String = text.chars().take(4096).collect();
@@ -573,7 +573,8 @@ pub(super) async fn tg_send_message(
     let payload = serde_json::json!({
       "chat_id": chat_id,
       "text": chunk,
-      "reply_to_message_id": reply_to_message_id
+      "reply_to_message_id": reply_to_message_id,
+      "disable_web_page_preview": true
     });
     let resp = client
       .post(&url)
@@ -686,23 +687,182 @@ fn split_for_telegram(text: &str, max_chars: usize) -> Vec<String> {
       }
     }
 
-    // Try to end on a sentence boundary.
-    let mut cut = None;
-    for (i, ch) in window.char_indices().rev() {
-      if ch == '.' || ch == '!' || ch == '?' || ch == '\n' {
-        // Don't create tiny chunks.
-        if i > 120 {
-          cut = Some(i + ch.len_utf8());
-          break;
+    // Prefer cutting on a list boundary so we don't split bullets awkwardly.
+    let list_markers = ["\n- ", "\n• ", "\n* ", "\n1. ", "\n2. ", "\n3. ", "\n4. "];
+    let mut list_cut: Option<usize> = None;
+    for m in list_markers {
+      if let Some(idx) = window.rfind(m) {
+        if idx > 120 {
+          list_cut = Some(list_cut.map(|b| b.max(idx + 1)).unwrap_or(idx + 1));
         }
       }
     }
-    let cut = cut.unwrap_or(end_byte);
+
+    // Try to end after a couple of completed sentences.
+    let cut = list_cut.unwrap_or_else(|| {
+      let mut ends: Vec<usize> = vec![];
+      let mut chars = window.char_indices().peekable();
+      while let Some((i, ch)) = chars.next() {
+        if ch == '.' || ch == '!' || ch == '?' || ch == '…' {
+          let next = chars.peek().map(|(_, c)| *c);
+          if next.is_none() || next.map(|c| c.is_whitespace()).unwrap_or(false) {
+            ends.push(i + ch.len_utf8());
+          }
+        }
+      }
+      // Use the 2nd sentence end when available (keeps "few sentences" feel).
+      let desired = 2usize;
+      if ends.len() >= desired && ends[desired - 1] > 80 {
+        ends[desired - 1]
+      } else {
+        // Fallback: last whitespace.
+        let mut last_ws = None;
+        for (i, ch) in window.char_indices() {
+          if ch.is_whitespace() && i > 120 {
+            last_ws = Some(i);
+          }
+        }
+        last_ws.unwrap_or(end_byte)
+      }
+    });
     out.push(s[..cut].trim().to_string());
     s = s[cut..].to_string();
   }
 
   out
+}
+
+fn format_for_telegram(input: &str) -> String {
+  // Keep Telegram output readable:
+  // - remove inline backticks (Telegram doesn't render them as code without parse_mode)
+  // - drop noisy absolute paths in skill listings
+  // - collapse excessive blank lines
+  let mut s = input.replace("\r\n", "\n");
+
+  // Special-case: "available skills" dumps look awful in Telegram due to long file paths.
+  // Make it a clean bullet list.
+  if s.contains("Доступні скіли") && (s.contains("SKILL.md") || s.contains("Файл:")) {
+    if let Some(compact) = compact_skills_list(&s) {
+      s = compact;
+    }
+  }
+
+  // Generic cleanup.
+  s = s.replace('`', "");
+
+  // Remove "Файл: /abs/path" fragments to avoid giant wrapped lines.
+  s = strip_file_paths(&s);
+
+  collapse_blank_lines(&s, 2)
+}
+
+fn compact_skills_list(raw: &str) -> Option<String> {
+  let raw = raw.replace("\r\n", "\n").replace('`', "");
+  let mut items: Vec<(String, String)> = vec![];
+
+  for line in raw.lines() {
+    let mut l = line.trim();
+    if l.is_empty() {
+      continue;
+    }
+    if l.starts_with("Доступні скіли") {
+      continue;
+    }
+    if l.starts_with('-') {
+      l = l.trim_start_matches('-').trim();
+    }
+
+    // Drop file paths if present: keep only the description part.
+    if let Some(idx) = l.find("Файл:") {
+      l = l[..idx].trim();
+    }
+
+    // Parse "name — description"
+    if let Some((name, desc)) = l.split_once('—') {
+      let name = name.trim().to_string();
+      let desc = name_desc_cleanup(desc);
+      if !name.is_empty() && !desc.is_empty() {
+        items.push((name, desc));
+      }
+      continue;
+    }
+
+    // Parse "name (description): /path/to/SKILL.md"
+    if l.contains("SKILL.md") {
+      let left = l.split(':').next().unwrap_or("").trim();
+      if !left.is_empty() {
+        // If we have parentheses, keep the part inside as description.
+        if let (Some(a), Some(b)) = (left.find('('), left.rfind(')')) {
+          if b > a {
+            let name = left[..a].trim().to_string();
+            let desc = left[a + 1..b].trim().to_string();
+            if !name.is_empty() && !desc.is_empty() {
+              items.push((name, desc));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if items.is_empty() {
+    return None;
+  }
+
+  let mut out = String::new();
+  out.push_str("Доступні скіли:\n");
+  for (name, desc) in items {
+    let d = if desc.chars().count() > 160 {
+      let short: String = desc.chars().take(157).collect();
+      format!("{short}…")
+    } else {
+      desc
+    };
+    out.push_str(&format!("• {name} — {d}\n"));
+  }
+  Some(out.trim().to_string())
+}
+
+fn name_desc_cleanup(desc: &str) -> String {
+  let mut d = desc.trim().to_string();
+  // Normalize spacing that sometimes gets awkward wraps.
+  d = d.replace("  ", " ");
+  // If someone pasted "(file: ...)" keep it out for Telegram.
+  if let Some(idx) = d.find("(file:") {
+    d = d[..idx].trim().to_string();
+  }
+  d
+}
+
+fn strip_file_paths(s: &str) -> String {
+  let mut out: Vec<String> = vec![];
+  for line in s.lines() {
+    let mut l = line.to_string();
+    if let Some(idx) = l.find("Файл:") {
+      l = l[..idx].trim_end().to_string();
+    }
+    // Replace common absolute home path prefix to reduce noise even if "Файл:" wasn't present.
+    l = l.replace("/Users/", "~/");
+    out.push(l);
+  }
+  out.join("\n").trim().to_string()
+}
+
+fn collapse_blank_lines(s: &str, max_run: usize) -> String {
+  let mut out = String::with_capacity(s.len());
+  let mut run = 0usize;
+  for ch in s.chars() {
+    if ch == '\n' {
+      run += 1;
+      if run <= max_run {
+        out.push(ch);
+      }
+    } else {
+      run = 0;
+      out.push(ch);
+    }
+  }
+  out.trim().to_string()
 }
 
 fn extract_text_message(update: &TgUpdate) -> Option<(i64, i64, String)> {

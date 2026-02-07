@@ -656,7 +656,7 @@ fn flush_turn_chunks(p: &mut PendingTurn, force: bool) {
       let window_end = byte_index_at_char(rem, 900);
       let window = &rem[..window_end];
       let has_para_break = window.contains("\n\n");
-      let enough = window.chars().count() >= 180;
+      let enough = count_sentence_endings(window) >= 2 || window.chars().count() >= 260;
       if !has_para_break && !enough {
         break;
       }
@@ -701,25 +701,12 @@ fn take_stream_chunk(full: &str, start_byte: usize, max_chars: usize, min_chars:
   }
 
   let end_byte = byte_index_at_char(rem, max_chars);
-  let window = &rem[..end_byte];
 
   let (cut_byte, chunk_text) = if end_byte >= rem.len() {
     (rem.len(), rem.trim().to_string())
-  } else if let Some(idx) = window.rfind("\n\n") {
-    let raw = &rem[..idx];
-    (idx + 2, raw.trim().to_string())
   } else {
-    // Try to end on sentence boundary within the window.
-    let mut cut = None;
-    for (i, ch) in window.char_indices().rev() {
-      if ch == '.' || ch == '!' || ch == '?' || ch == '\n' {
-        if i > 120 {
-          cut = Some(i + ch.len_utf8());
-          break;
-        }
-      }
-    }
-    let cut = cut.unwrap_or(end_byte);
+    let desired_sentences = if min_chars <= 1 { 1 } else { 2 };
+    let cut = find_natural_cut(rem, end_byte, min_chars, desired_sentences);
     let raw = &rem[..cut];
     (cut, raw.trim().to_string())
   };
@@ -740,6 +727,89 @@ fn take_stream_chunk(full: &str, start_byte: usize, max_chars: usize, min_chars:
   }
 
   Some((new_start, chunk_text))
+}
+
+fn count_sentence_endings(s: &str) -> usize {
+  let mut count = 0usize;
+  let mut iter = s.chars().peekable();
+  while let Some(ch) = iter.next() {
+    if ch == '.' || ch == '!' || ch == '?' || ch == '…' {
+      let next = iter.peek().copied();
+      if next.is_none() || next.map(|c| c.is_whitespace()).unwrap_or(false) {
+        count += 1;
+      }
+    }
+  }
+  count
+}
+
+fn find_natural_cut(rem: &str, window_end: usize, min_chars: usize, desired_sentences: usize) -> usize {
+  let window = &rem[..window_end];
+  let min_byte = byte_index_at_char(rem, min_chars.min(900));
+
+  // 1) Prefer a paragraph break.
+  if let Some(idx) = window.rfind("\n\n") {
+    let cut = idx + 2;
+    if cut >= min_byte && cut > 0 {
+      return cut;
+    }
+  }
+
+  // 2) Prefer cutting before a new list item starts (so the next chunk begins with "- ...").
+  let list_markers = ["\n- ", "\n• ", "\n* ", "\n1. ", "\n2. ", "\n3. ", "\n4. "];
+  let mut best_list_cut: Option<usize> = None;
+  for m in list_markers {
+    if let Some(idx) = window.rfind(m) {
+      let cut = idx + 1; // keep '\n' at end of previous chunk
+      if cut >= min_byte && cut > 0 {
+        best_list_cut = Some(best_list_cut.map(|b| b.max(cut)).unwrap_or(cut));
+      }
+    }
+  }
+  if let Some(cut) = best_list_cut {
+    return cut;
+  }
+
+  // 3) Cut after N completed sentences if possible.
+  let mut sentence_ends: Vec<usize> = vec![];
+  let mut chars = window.char_indices().peekable();
+  while let Some((i, ch)) = chars.next() {
+    if ch == '.' || ch == '!' || ch == '?' || ch == '…' {
+      let next = chars.peek().map(|(_, c)| *c);
+      if next.is_none() || next.map(|c| c.is_whitespace()).unwrap_or(false) {
+        sentence_ends.push(i + ch.len_utf8());
+      }
+    }
+  }
+  if !sentence_ends.is_empty() {
+    let mut candidate: Option<usize> = None;
+    for (idx, end) in sentence_ends.iter().enumerate() {
+      let have = idx + 1;
+      if have >= desired_sentences && *end >= min_byte {
+        candidate = Some(*end);
+      }
+    }
+    if let Some(c) = candidate {
+      return c.min(window_end);
+    }
+  }
+
+  // 4) Fallback: cut on last whitespace to avoid breaking words/paths.
+  if window_end > 0 {
+    let mut last_ws: Option<usize> = None;
+    for (i, ch) in window.char_indices() {
+      if ch.is_whitespace() && i >= min_byte {
+        last_ws = Some(i);
+      }
+    }
+    if let Some(i) = last_ws {
+      if i > 0 {
+        return i;
+      }
+    }
+  }
+
+  window_end
 }
 
 fn load_chat_threads(app: &AppHandle) -> (Option<PathBuf>, HashMap<i64, String>) {

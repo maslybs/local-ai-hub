@@ -69,6 +69,18 @@ impl TelegramRuntime {
         .build()
         .expect("reqwest client");
 
+      // Warm up Codex in the background so the first user message feels faster.
+      {
+        let codex = runtime.inner.codex.clone();
+        let logs = runtime.inner.logs.clone();
+        tauri::async_runtime::spawn(async move {
+          logs.push(logbus::LogLevel::Info, "codex", "warmup connect");
+          if let Err(e) = codex.connect().await {
+            logs.push(logbus::LogLevel::Error, "codex", format!("warmup failed: {e}"));
+          }
+        });
+      }
+
       // get bot username
       match tg_get_me(&client, &token).await {
         Ok(username) => {
@@ -201,12 +213,31 @@ impl TelegramRuntime {
                     let codex = runtime.inner.codex.clone();
                     runtime.inner.logs.push(logbus::LogLevel::Info, "telegram", format!("codex request chat_id={chat_id}"));
                     tauri::async_runtime::spawn(async move {
+                      let (typing_tx, mut typing_rx) = watch::channel(false);
+                      // Standard Telegram loader while Codex works.
+                      let client3 = client2.clone();
+                      let token3 = token2.clone();
+                      tauri::async_runtime::spawn(async move {
+                        loop {
+                          if *typing_rx.borrow() {
+                            break;
+                          }
+                          let _ = tg_send_chat_action(&client3, &token3, chat_id, "typing").await;
+                          tokio::select! {
+                            _ = typing_rx.changed() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                          }
+                        }
+                      });
+
                       let out = match codex.ask_text(chat_id, &prompt).await {
                         Ok(s) => s,
                         Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
                         Err(e) => format!("Codex error: {e}"),
                       };
-                      if let Err(e) = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await {
+                      let _ = typing_tx.send(true);
+
+                      if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &out, Some(message_id)).await {
                         log::info!("telegram: send codex reply failed: {e}");
                       }
                     });
@@ -224,12 +255,30 @@ impl TelegramRuntime {
                     let codex = runtime.inner.codex.clone();
                     runtime.inner.logs.push(logbus::LogLevel::Info, "telegram", format!("codex request chat_id={chat_id}"));
                     tauri::async_runtime::spawn(async move {
+                      let (typing_tx, mut typing_rx) = watch::channel(false);
+                      let client3 = client2.clone();
+                      let token3 = token2.clone();
+                      tauri::async_runtime::spawn(async move {
+                        loop {
+                          if *typing_rx.borrow() {
+                            break;
+                          }
+                          let _ = tg_send_chat_action(&client3, &token3, chat_id, "typing").await;
+                          tokio::select! {
+                            _ = typing_rx.changed() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(4)) => {}
+                          }
+                        }
+                      });
+
                       let out = match codex.ask_text(chat_id, &prompt).await {
                         Ok(s) => s,
                         Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
                         Err(e) => format!("Codex error: {e}"),
                       };
-                      if let Err(e) = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await {
+                      let _ = typing_tx.send(true);
+
+                      if let Err(e) = tg_send_message_series(&client2, &token2, chat_id, &out, Some(message_id)).await {
                         log::info!("telegram: send codex reply failed: {e}");
                       }
                     });
@@ -296,7 +345,7 @@ struct TgUser {
   username: Option<String>,
 }
 
-async fn tg_get_me(client: &Client, token: &str) -> Result<Option<String>, String> {
+pub(super) async fn tg_get_me(client: &Client, token: &str) -> Result<Option<String>, String> {
   let url = format!("https://api.telegram.org/bot{token}/getMe");
   let resp = client
     .get(url)
@@ -358,7 +407,7 @@ async fn tg_get_updates(
   Ok((new_offset, items))
 }
 
-async fn tg_send_message(
+pub(super) async fn tg_send_message(
   client: &Client,
   token: &str,
   chat_id: i64,
@@ -391,6 +440,113 @@ async fn tg_send_message(
     }
   }
   Ok(())
+}
+
+async fn tg_send_chat_action(
+  client: &Client,
+  token: &str,
+  chat_id: i64,
+  action: &str,
+) -> Result<(), String> {
+  let url = format!("https://api.telegram.org/bot{token}/sendChatAction");
+  let payload = serde_json::json!({
+    "chat_id": chat_id,
+    "action": action
+  });
+  let resp = client
+    .post(&url)
+    .json(&payload)
+    .send()
+    .await
+    .map_err(|e| format!("sendChatAction request failed: {e}"))?;
+  let body: TgResponse<serde_json::Value> = resp
+    .json()
+    .await
+    .map_err(|e| format!("sendChatAction parse failed: {e}"))?;
+  if !body.ok {
+    return Err(body.description.unwrap_or_else(|| "sendChatAction failed".to_string()));
+  }
+  Ok(())
+}
+
+async fn tg_send_message_series(
+  client: &Client,
+  token: &str,
+  chat_id: i64,
+  text: &str,
+  reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+  let parts = split_for_telegram(text, 900);
+  let mut first = true;
+  for part in parts {
+    if part.trim().is_empty() {
+      continue;
+    }
+    tg_send_message(
+      client,
+      token,
+      chat_id,
+      &part,
+      if first { reply_to_message_id } else { None },
+    )
+    .await?;
+    first = false;
+    tokio::time::sleep(Duration::from_millis(220)).await;
+  }
+  Ok(())
+}
+
+fn split_for_telegram(text: &str, max_chars: usize) -> Vec<String> {
+  let mut out: Vec<String> = vec![];
+  let mut s = text.replace("\r\n", "\n");
+
+  // Preserve paragraph breaks, but keep messages short (a few sentences).
+  while !s.trim().is_empty() {
+    // Find the byte index that corresponds to max_chars.
+    let mut end_byte = s.len();
+    let mut count = 0usize;
+    for (i, _) in s.char_indices() {
+      if count == max_chars {
+        end_byte = i;
+        break;
+      }
+      count += 1;
+    }
+
+    // Entire remainder fits in one message.
+    if count <= max_chars {
+      out.push(s.trim().to_string());
+      break;
+    }
+
+    let window = &s[..end_byte]; // safe UTF-8 boundary from char_indices
+
+    // Prefer to cut on a blank line within the window.
+    if let Some(idx) = window.rfind("\n\n") {
+      if idx > 0 {
+        out.push(window[..idx].trim().to_string());
+        s = s[idx + 2..].to_string();
+        continue;
+      }
+    }
+
+    // Try to end on a sentence boundary.
+    let mut cut = None;
+    for (i, ch) in window.char_indices().rev() {
+      if ch == '.' || ch == '!' || ch == '?' || ch == '\n' {
+        // Don't create tiny chunks.
+        if i > 120 {
+          cut = Some(i + ch.len_utf8());
+          break;
+        }
+      }
+    }
+    let cut = cut.unwrap_or(end_byte);
+    out.push(s[..cut].trim().to_string());
+    s = s[cut..].to_string();
+  }
+
+  out
 }
 
 fn extract_text_message(update: &TgUpdate) -> Option<(i64, i64, String)> {

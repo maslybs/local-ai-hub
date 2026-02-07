@@ -14,6 +14,7 @@ import {
 import { Input } from '@/components/ui/input';
 import type { AppConfig, TelegramStatus } from '@/lib/backend';
 import { Switch } from '@/components/ui/switch';
+import { backend } from '@/lib/backend';
 
 type TelegramViewProps = {
   tokenStored: boolean;
@@ -52,6 +53,7 @@ export function TelegramView({
   const storageMode = config?.telegram?.token_storage ?? 'keychain';
   const lastErr = telegramStatus?.last_error ?? null;
   const lastPoll = telegramStatus?.last_poll_unix_ms ?? null;
+  const botUsername = telegramStatus?.bot_username ?? null;
 
   return (
     <div className="space-y-4">
@@ -67,6 +69,7 @@ export function TelegramView({
             <div className="text-base font-semibold">Telegram</div>
             <Badge variant={telegramRunning ? 'success' : 'secondary'}>{telegramRunning ? 'On' : 'Off'}</Badge>
             <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? 'Token set' : 'Token missing'}</Badge>
+            {botUsername && <Badge variant="outline">@{botUsername}</Badge>}
           </div>
 
           <Dialog>
@@ -87,6 +90,26 @@ export function TelegramView({
               <div className="space-y-3">
                 {err && <div className="text-sm text-destructive">{err}</div>}
                 {!err && tokenError && <div className="text-sm text-destructive">{tokenError}</div>}
+                <div className="flex justify-end">
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      setErr(null);
+                      try {
+                        const r = await backend.telegramSelfTest();
+                        if (!r.ok) {
+                          setErr(r.error || 'Self-test failed');
+                        } else if (!r.sent_test_message) {
+                          setErr('Self-test OK, але не надіслав test message (allowlist порожній?).');
+                        }
+                      } catch (e: any) {
+                        setErr(e?.message ?? String(e));
+                      }
+                    }}
+                  >
+                    Self-test
+                  </Button>
+                </div>
 
                 <div className="rounded-xl bg-muted/20 p-4">
                   <div className="flex items-center justify-between gap-3">

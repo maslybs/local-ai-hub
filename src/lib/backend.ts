@@ -37,6 +37,13 @@ export type LogEntry = {
   msg: string;
 };
 
+export type TelegramSelfTestResult = {
+  ok: boolean;
+  bot_username: string | null;
+  sent_test_message: boolean;
+  error: string | null;
+};
+
 export type SecretStatus = {
   stored: boolean;
   error: string | null;
@@ -111,6 +118,11 @@ export const backend = {
   async telegramStatus(): Promise<TelegramStatus> {
     const invoke = await getInvoke();
     return invoke<TelegramStatus>('telegram_status');
+  },
+
+  async telegramSelfTest(): Promise<TelegramSelfTestResult> {
+    const invoke = await getInvoke();
+    return invoke<TelegramSelfTestResult>('telegram_self_test');
   },
 
   async codexStatus(): Promise<CodexStatus> {

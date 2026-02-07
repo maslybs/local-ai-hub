@@ -89,6 +89,12 @@ async fn telegram_status(state: State<'_, AppState>) -> Result<connectors::teleg
   Ok(state.telegram.status().await)
 }
 
+#[tauri::command]
+async fn telegram_self_test(app: AppHandle, state: State<'_, AppState>) -> Result<connectors::telegram::self_test::TelegramSelfTestResult, String> {
+  let cfg = state.config.read().await.clone();
+  connectors::telegram::self_test::telegram_self_test(app, cfg).await
+}
+
 fn load_or_default_config(app: &AppHandle) -> config_store::AppConfig {
   let path = paths::config_path(app).ok();
   if let Some(path) = path {
@@ -136,7 +142,8 @@ pub fn run() {
       telegram_delete_token,
       telegram_start,
       telegram_stop,
-      telegram_status
+      telegram_status,
+      telegram_self_test
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

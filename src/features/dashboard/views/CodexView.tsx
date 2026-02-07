@@ -21,13 +21,16 @@ export function CodexView({ codexReady }: CodexViewProps) {
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
   const [status, setStatus] = React.useState<Awaited<ReturnType<typeof backend.codexStatus>> | null>(null);
+  const [workspaceDir, setWorkspaceDir] = React.useState<string>('');
 
   React.useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const st = await backend.codexStatus();
-        if (alive) setStatus(st);
+        const [st, cfg] = await Promise.all([backend.codexStatus(), backend.getConfig()]);
+        if (!alive) return;
+        setStatus(st);
+        setWorkspaceDir(cfg?.codex?.workspace_dir ?? '');
       } catch {
         // ignore
       }
@@ -45,6 +48,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
         <div className="flex items-center gap-2">
           <div className="text-base font-semibold">Codex</div>
           <Badge variant={codexReady ? 'success' : 'warning'}>{codexReady ? 'Ready' : 'Setup'}</Badge>
+          <Badge variant={authMode ? 'outline' : 'secondary'}>{authMode ?? 'Sign in'}</Badge>
         </div>
 
         <div className="flex items-center gap-2">
@@ -83,6 +87,38 @@ export function CodexView({ codexReady }: CodexViewProps) {
 
               <div className="space-y-3">
                 {err && <div className="text-sm text-destructive">{err}</div>}
+
+                <div className="rounded-xl bg-muted/20 p-4">
+                  <div className="text-sm font-medium">Робоча папка</div>
+                  <div className="mt-3 flex gap-2">
+                    <Input
+                      placeholder="/path/to/project"
+                      value={workspaceDir}
+                      onChange={(e) => setWorkspaceDir(e.target.value)}
+                    />
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        setErr(null);
+                        try {
+                          const cfg = await backend.getConfig();
+                          cfg.codex = cfg.codex ?? { workspace_dir: null };
+                          cfg.codex.workspace_dir = workspaceDir.trim() ? workspaceDir.trim() : null;
+                          await backend.saveConfig(cfg);
+                        } catch (e: any) {
+                          setErr(e?.message ?? String(e));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                      title="AGENTS.md береться з цієї папки"
+                    >
+                      Зберегти
+                    </Button>
+                  </div>
+                </div>
 
                 <div className="rounded-xl bg-muted/20 p-4">
                   <div className="flex items-center justify-between gap-3">

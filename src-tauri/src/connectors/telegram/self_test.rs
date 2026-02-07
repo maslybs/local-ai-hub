@@ -29,6 +29,7 @@ pub async fn telegram_self_test(app: AppHandle, cfg: AppConfig) -> Result<Telegr
 
   let client = Client::builder()
     .timeout(Duration::from_secs(20))
+    .http1_only()
     .build()
     .map_err(|e| format!("reqwest client failed: {e}"))?;
 
@@ -59,4 +60,3 @@ pub async fn telegram_self_test(app: AppHandle, cfg: AppConfig) -> Result<Telegr
     error: None,
   })
 }
-

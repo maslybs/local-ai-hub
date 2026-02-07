@@ -39,10 +39,26 @@ impl Default for TelegramConfig {
   }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexConfig {
+  // Folder that Codex should treat as the "workspace" (used for AGENTS.md and tool context).
+  // If not set, we fall back to current working directory of the app process.
+  #[serde(default)]
+  pub workspace_dir: Option<String>,
+}
+
+impl Default for CodexConfig {
+  fn default() -> Self {
+    Self { workspace_dir: None }
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
   #[serde(default)]
   pub telegram: TelegramConfig,
+  #[serde(default)]
+  pub codex: CodexConfig,
 }
 
 pub fn load_config(path: &PathBuf) -> Result<AppConfig, String> {

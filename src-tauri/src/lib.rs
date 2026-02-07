@@ -36,6 +36,10 @@ async fn save_config(app: AppHandle, state: State<'_, AppState>, cfg: config_sto
     let mut guard = state.config.write().await;
     *guard = cfg.clone();
   }
+
+  // Keep Codex runtime in sync with config changes (workspace folder influences AGENTS.md and tool context).
+  state.codex.set_workspace_dir(cfg.codex.workspace_dir.clone()).await;
+
   let path = paths::config_path(&app)?;
   config_store::save_config(&path, &cfg)
 }
@@ -116,12 +120,26 @@ pub fn run() {
       )?;
 
       let cfg = load_or_default_config(&app.handle());
+      let cfg0 = cfg.clone();
       let cfg = Arc::new(RwLock::new(cfg));
       let logs = logbus::LogBus::new(1200);
       logs.push(logbus::LogLevel::Info, "app", "startup");
 
       let codex = CodexRuntime::new(&app.handle(), logs.clone());
+      tauri::async_runtime::block_on(codex.set_workspace_dir(cfg0.codex.workspace_dir.clone()));
       let telegram = TelegramRuntime::new(cfg.clone(), codex.clone(), logs.clone());
+
+      // Warm up Codex on startup so the UI doesn't look "stuck" and the first Telegram message is faster.
+      {
+        let codex2 = codex.clone();
+        let logs2 = logs.clone();
+        tauri::async_runtime::spawn(async move {
+          logs2.push(logbus::LogLevel::Info, "codex", "startup warmup connect");
+          if let Err(e) = codex2.connect().await {
+            logs2.push(logbus::LogLevel::Error, "codex", format!("startup warmup failed: {e}"));
+          }
+        });
+      }
 
       app.manage(AppState { config: cfg, telegram, codex, logs });
       Ok(())

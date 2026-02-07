@@ -124,6 +124,7 @@ export function TelegramView({
                         setErr(null);
                         const next: AppConfig = config ?? {
                           telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                          codex: { workspace_dir: null },
                         };
                         next.telegram.token_storage = checked ? 'file' : 'keychain';
                         try {
@@ -192,6 +193,7 @@ export function TelegramView({
                         }
                         const next: AppConfig = config ?? {
                           telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                          codex: { workspace_dir: null },
                         };
                         const set = new Set(next.telegram.allowed_chat_ids ?? []);
                         set.add(id);
@@ -219,6 +221,7 @@ export function TelegramView({
                             setErr(null);
                             const next: AppConfig = config ?? {
                               telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                              codex: { workspace_dir: null },
                             };
                         next.telegram.allowed_chat_ids = (next.telegram.allowed_chat_ids ?? []).filter((x) => x !== id);
                         try {
@@ -254,6 +257,7 @@ export function TelegramView({
                         }
                         const next: AppConfig = config ?? {
                           telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+                          codex: { workspace_dir: null },
                         };
                         next.telegram.poll_timeout_sec = Math.floor(v);
                         try {

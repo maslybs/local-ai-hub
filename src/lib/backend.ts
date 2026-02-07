@@ -17,8 +17,13 @@ export type TelegramConfig = {
   token_storage: 'keychain' | 'file';
 };
 
+export type CodexConfig = {
+  workspace_dir: string | null;
+};
+
 export type AppConfig = {
   telegram: TelegramConfig;
+  codex: CodexConfig;
 };
 
 export type TelegramStatus = {

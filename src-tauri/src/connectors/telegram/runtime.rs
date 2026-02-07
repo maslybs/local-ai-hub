@@ -1,4 +1,4 @@
-use std::{fs, sync::Arc, time::Duration};
+use std::{error::Error, fs, sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde::Deserialize;
@@ -66,6 +66,8 @@ impl TelegramRuntime {
     tauri::async_runtime::spawn(async move {
       let client = Client::builder()
         .timeout(Duration::from_secs(70))
+        // Long-polling can be flaky over HTTP/2 on some networks; Telegram fully supports HTTP/1.1.
+        .http1_only()
         .build()
         .expect("reqwest client");
 
@@ -431,6 +433,47 @@ fn now_unix_ms() -> u128 {
     .as_millis()
 }
 
+fn redact_token(s: &str, token: &str) -> String {
+  if token.trim().is_empty() {
+    return s.to_string();
+  }
+  s.replace(token, "[REDACTED]")
+}
+
+fn format_reqwest_error(e: &reqwest::Error, token: &str) -> String {
+  let mut parts: Vec<String> = vec![];
+
+  let mut base = e.to_string();
+  base = redact_token(&base, token);
+  parts.push(base);
+
+  if e.is_timeout() {
+    parts.push("timeout".to_string());
+  }
+  if e.is_connect() {
+    parts.push("connect".to_string());
+  }
+  if let Some(status) = e.status() {
+    parts.push(format!("http {status}"));
+  }
+
+  // Include a short error chain (often has the real cause).
+  let mut src = e.source();
+  let mut depth = 0usize;
+  while let Some(s) = src {
+    depth += 1;
+    if depth > 4 {
+      break;
+    }
+    let mut t = s.to_string();
+    t = redact_token(&t, token);
+    parts.push(t);
+    src = s.source();
+  }
+
+  parts.join(": ")
+}
+
 #[derive(Debug, Deserialize)]
 struct TgResponse<T> {
   ok: bool,
@@ -449,8 +492,14 @@ pub(super) async fn tg_get_me(client: &Client, token: &str) -> Result<Option<Str
     .get(url)
     .send()
     .await
-    .map_err(|e| format!("getMe request failed: {e}"))?;
-  let body: TgResponse<TgUser> = resp.json().await.map_err(|e| format!("getMe parse failed: {e}"))?;
+    .map_err(|e| format!("getMe request failed: {}", format_reqwest_error(&e, token)))?;
+  let status = resp.status();
+  let raw = resp
+    .text()
+    .await
+    .map_err(|e| format!("getMe read failed: {}", format_reqwest_error(&e, token)))?;
+  let body: TgResponse<TgUser> = serde_json::from_str(&raw)
+    .map_err(|e| format!("getMe parse failed (http {status}): {e}"))?;
   if !body.ok {
     return Err(body.description.unwrap_or_else(|| "getMe failed".to_string()));
   }
@@ -488,11 +537,14 @@ async fn tg_get_updates(
     .query(&[("offset", offset), ("timeout", timeout_sec), ("limit", 50_i64)])
     .send()
     .await
-    .map_err(|e| format!("getUpdates request failed: {e}"))?;
-  let body: TgResponse<Vec<TgUpdate>> = resp
-    .json()
+    .map_err(|e| format!("getUpdates request failed: {}", format_reqwest_error(&e, token)))?;
+  let status = resp.status();
+  let raw = resp
+    .text()
     .await
-    .map_err(|e| format!("getUpdates parse failed: {e}"))?;
+    .map_err(|e| format!("getUpdates read failed: {}", format_reqwest_error(&e, token)))?;
+  let body: TgResponse<Vec<TgUpdate>> = serde_json::from_str(&raw)
+    .map_err(|e| format!("getUpdates parse failed (http {status}): {e}"))?;
   if !body.ok {
     return Err(body.description.unwrap_or_else(|| "getUpdates failed".to_string()));
   }
@@ -528,11 +580,14 @@ pub(super) async fn tg_send_message(
       .json(&payload)
       .send()
       .await
-      .map_err(|e| format!("sendMessage request failed: {e}"))?;
-    let body: TgResponse<serde_json::Value> = resp
-      .json()
+      .map_err(|e| format!("sendMessage request failed: {}", format_reqwest_error(&e, token)))?;
+    let status = resp.status();
+    let raw = resp
+      .text()
       .await
-      .map_err(|e| format!("sendMessage parse failed: {e}"))?;
+      .map_err(|e| format!("sendMessage read failed: {}", format_reqwest_error(&e, token)))?;
+    let body: TgResponse<serde_json::Value> = serde_json::from_str(&raw)
+      .map_err(|e| format!("sendMessage parse failed (http {status}): {e}"))?;
     if !body.ok {
       return Err(body.description.unwrap_or_else(|| "sendMessage failed".to_string()));
     }
@@ -556,11 +611,14 @@ async fn tg_send_chat_action(
     .json(&payload)
     .send()
     .await
-    .map_err(|e| format!("sendChatAction request failed: {e}"))?;
-  let body: TgResponse<serde_json::Value> = resp
-    .json()
+    .map_err(|e| format!("sendChatAction request failed: {}", format_reqwest_error(&e, token)))?;
+  let status = resp.status();
+  let raw = resp
+    .text()
     .await
-    .map_err(|e| format!("sendChatAction parse failed: {e}"))?;
+    .map_err(|e| format!("sendChatAction read failed: {}", format_reqwest_error(&e, token)))?;
+  let body: TgResponse<serde_json::Value> = serde_json::from_str(&raw)
+    .map_err(|e| format!("sendChatAction parse failed (http {status}): {e}"))?;
   if !body.ok {
     return Err(body.description.unwrap_or_else(|| "sendChatAction failed".to_string()));
   }

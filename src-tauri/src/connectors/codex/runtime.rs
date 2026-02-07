@@ -1,6 +1,7 @@
 use std::{
   collections::{HashMap, HashSet},
   fs,
+  io,
   process::Stdio,
   path::PathBuf,
   sync::{
@@ -43,7 +44,7 @@ struct Inner {
   busy_chats: Mutex<HashSet<i64>>,
   chat_threads_path: Option<PathBuf>,
   logs: logbus::LogBus,
-  default_cwd: Option<String>,
+  default_cwd: RwLock<Option<String>>,
 }
 
 struct PendingTurn {
@@ -73,9 +74,17 @@ impl CodexRuntime {
         busy_chats: Mutex::new(HashSet::new()),
         chat_threads_path,
         logs,
-        default_cwd,
+        default_cwd: RwLock::new(default_cwd),
       }),
     }
+  }
+
+  pub async fn set_workspace_dir(&self, workspace_dir: Option<String>) {
+    let ws = workspace_dir.and_then(|s| {
+      let t = s.trim().to_string();
+      if t.is_empty() { None } else { Some(t) }
+    });
+    *self.inner.default_cwd.write().await = ws;
   }
 
   pub async fn status(&self) -> CodexStatus {
@@ -158,7 +167,24 @@ impl CodexRuntime {
       .stdout(Stdio::piped())
       .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start codex app-server: {e}"))?;
+    let mut child = match cmd.spawn() {
+      Ok(c) => c,
+      Err(e) => {
+        let extra = match e.kind() {
+          io::ErrorKind::NotFound => " (binary 'codex' not found in PATH)",
+          _ => "",
+        };
+        let msg = format!("Failed to start codex app-server{extra}: {e}");
+        {
+          let mut st = self.inner.status.write().await;
+          st.running = false;
+          st.initialized = false;
+          st.last_error = Some(msg.clone());
+        }
+        self.inner.logs.push(logbus::LogLevel::Error, "codex", msg.clone());
+        return Err(msg);
+      }
+    };
     let stdin = child.stdin.take().ok_or_else(|| "Failed to open codex stdin".to_string())?;
     let stdout = child.stdout.take().ok_or_else(|| "Failed to open codex stdout".to_string())?;
     let stderr = child.stderr.take().ok_or_else(|| "Failed to open codex stderr".to_string())?;
@@ -185,7 +211,9 @@ impl CodexRuntime {
           Ok(msg) => handle_server_msg(inner.clone(), msg).await,
           Err(e) => {
             let mut st = inner.status.write().await;
-            st.last_error = Some(format!("codex stdout parse failed: {e}"));
+            let msg = format!("codex stdout parse failed: {e}");
+            st.last_error = Some(msg.clone());
+            inner.logs.push(logbus::LogLevel::Error, "codex", msg);
           }
         }
       }
@@ -196,12 +224,15 @@ impl CodexRuntime {
       if st.last_error.is_none() {
         st.last_error = Some("codex app-server stopped".to_string());
       }
+      inner.logs.push(logbus::LogLevel::Warn, "codex", "app-server stopped");
     });
 
+    let inner2 = self.inner.clone();
     tauri::async_runtime::spawn(async move {
       let mut lines = BufReader::new(stderr).lines();
       while let Ok(Some(line)) = lines.next_line().await {
         log::info!("codex(app-server): {}", line);
+        handle_codex_stderr(inner2.clone(), line).await;
       }
     });
 
@@ -270,7 +301,7 @@ impl CodexRuntime {
         { "type": "text", "text": text }
       ]
     });
-    if let Some(cwd) = self.inner.default_cwd.clone() {
+    if let Some(cwd) = self.inner.default_cwd.read().await.clone() {
       params["cwd"] = Value::String(cwd);
     }
     let turn_start = self.send_request("turn/start", params).await?;
@@ -315,22 +346,6 @@ impl CodexRuntime {
     Ok(CodexStream { updates_rx, done_rx })
   }
 
-  pub async fn ask_text(&self, chat_id: i64, text: &str) -> Result<String, String> {
-    let CodexStream {
-      mut updates_rx,
-      done_rx,
-    } = self.start_turn_stream(chat_id, text).await?;
-
-    // Drain streaming updates so the channel doesn't grow unbounded if someone calls ask_text.
-    tauri::async_runtime::spawn(async move {
-      while let Some(_chunk) = updates_rx.recv().await {}
-    });
-
-    done_rx
-      .await
-      .map_err(|_| "Codex internal channel closed".to_string())?
-  }
-
   async fn thread_for_chat(&self, chat_id: i64) -> Result<String, String> {
     if let Some(t) = self.inner.chat_threads.lock().await.get(&chat_id).cloned() {
       self.resume_thread_if_needed(&t).await?;
@@ -345,7 +360,7 @@ impl CodexRuntime {
       "approvalPolicy": "never",
       "sandbox": "read-only"
     });
-    if let Some(cwd) = self.inner.default_cwd.clone() {
+    if let Some(cwd) = self.inner.default_cwd.read().await.clone() {
       params["cwd"] = Value::String(cwd);
     }
     let res = self.send_request("thread/start", params).await?;
@@ -383,7 +398,7 @@ impl CodexRuntime {
       "approvalPolicy": "never",
       "sandbox": "read-only"
     });
-    if let Some(cwd) = self.inner.default_cwd.clone() {
+    if let Some(cwd) = self.inner.default_cwd.read().await.clone() {
       params["cwd"] = Value::String(cwd);
     }
     let _ = self.send_request("thread/resume", params).await?;
@@ -505,7 +520,8 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
         st.last_error = Some(err.unwrap_or_else(|| "Login failed".to_string()));
       }
     }
-    "item/agentMessage/delta" => {
+    // Codex protocol has evolved; treat any item/*/delta that contains { turnId, delta } as assistant text.
+    m if m.starts_with("item/") && m.ends_with("/delta") => {
       let turn_id = params.get("turnId").and_then(|v| v.as_str()).unwrap_or("").to_string();
       if turn_id.is_empty() {
         return;
@@ -526,17 +542,20 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
         return;
       }
       let item = params.get("item").cloned().unwrap_or(Value::Null);
-      if item.get("type").and_then(|t| t.as_str()) == Some("agentMessage") {
-        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-          let mut turns = inner.pending_turns.lock().await;
-          if let Some(p) = turns.get_mut(&turn_id) {
-            // item/completed contains the full text for this agent message.
-            // Prefer it over deltas (it can be more complete).
-            if text.len() >= p.full_text.len() {
-              p.full_text = text.to_string();
-            }
-            flush_turn_chunks(p, false);
+      let ty = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+      let is_message = ty == "agentMessage" || ty == "assistantMessage" || ty.ends_with("Message");
+      if !is_message {
+        return;
+      }
+      if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+        let mut turns = inner.pending_turns.lock().await;
+        if let Some(p) = turns.get_mut(&turn_id) {
+          // item/completed contains the full text for this message.
+          // Prefer it over deltas (it can be more complete).
+          if text.len() >= p.full_text.len() {
+            p.full_text = text.to_string();
           }
+          flush_turn_chunks(p, false);
         }
       }
     }
@@ -575,6 +594,47 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
       st.last_error = Some(format!("codex error: {params}"));
     }
     _ => {}
+  }
+}
+
+async fn handle_codex_stderr(inner: Arc<Inner>, line: String) {
+  let needle = "state db missing rollout path for thread ";
+  if let Some(idx) = line.find(needle) {
+    let after = &line[idx + needle.len()..];
+    let thread_id = after.split_whitespace().next().unwrap_or("").to_string();
+    if thread_id.is_empty() {
+      return;
+    }
+
+    // If Codex no longer has state for a persisted thread, drop it so the next message creates a fresh thread.
+    {
+      let mut resumed = inner.resumed_threads.lock().await;
+      resumed.remove(&thread_id);
+    }
+
+    let mut removed_any = false;
+    {
+      let mut threads = inner.chat_threads.lock().await;
+      let keys: Vec<i64> = threads
+        .iter()
+        .filter_map(|(k, v)| if v == &thread_id { Some(*k) } else { None })
+        .collect();
+      for k in keys {
+        threads.remove(&k);
+        removed_any = true;
+      }
+      if removed_any {
+        let _ = persist_chat_threads(inner.chat_threads_path.as_ref(), &threads);
+      }
+    }
+
+    if removed_any {
+      inner.logs.push(
+        logbus::LogLevel::Warn,
+        "codex",
+        "Codex thread state missing; reset stored thread mapping for a chat".to_string(),
+      );
+    }
   }
 }
 

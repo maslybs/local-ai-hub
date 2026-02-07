@@ -1227,14 +1227,12 @@ fn take_stream_chunk(full: &str, start_byte: usize, max_chars: usize, min_chars:
 
   let end_byte = byte_index_at_char(rem, max_chars);
 
-  let (cut_byte, chunk_text) = if end_byte >= rem.len() {
-    (rem.len(), rem.trim().to_string())
-  } else {
-    let desired_sentences = if min_chars <= 1 { 1 } else { 2 };
-    let cut = find_natural_cut(rem, end_byte, min_chars, desired_sentences);
-    let raw = &rem[..cut];
-    (cut, raw.trim().to_string())
-  };
+  let desired_sentences = if min_chars <= 1 { 1 } else { 2 };
+  let cut = find_stream_cut(rem, end_byte.min(rem.len()), min_chars, desired_sentences, min_chars <= 1)?;
+  let raw = &rem[..cut];
+  // Keep leading indentation (useful for code blocks), but drop trailing whitespace/newlines.
+  let chunk_text = raw.trim_end().to_string();
+  let cut_byte = cut;
 
   if chunk_text.chars().count() < min_chars {
     return None;
@@ -1268,15 +1266,73 @@ fn count_sentence_endings(s: &str) -> usize {
   count
 }
 
-fn find_natural_cut(rem: &str, window_end: usize, min_chars: usize, desired_sentences: usize) -> usize {
+fn is_safe_chunk_boundary(rem: &str, cut: usize, force: bool) -> bool {
+  if cut == 0 || cut > rem.len() {
+    return false;
+  }
+  if !rem.is_char_boundary(cut) {
+    return false;
+  }
+
+  // Look at the last non-whitespace char in the left side.
+  let left = &rem[..cut];
+  let before = left.chars().rev().find(|c| !c.is_whitespace());
+  let after = rem[cut..].chars().next();
+
+  // If we still have more text buffered, prefer boundaries that obviously separate tokens.
+  // If we're forcing (turn completed), allow any boundary (we must flush).
+  if force {
+    return true;
+  }
+
+  let Some(b) = before else {
+    return false;
+  };
+
+  // Good boundaries: paragraph/list separators or sentence punctuation.
+  if b == '.' || b == '!' || b == '?' || b == '…' || b == ':' || b == ';' || b == ')' || b == ']' || b == '}' || b == ',' {
+    return true;
+  }
+
+  // Cutting on whitespace is safe (we will trim_end on the chunk and skip whitespace when advancing).
+  if left.ends_with(char::is_whitespace) {
+    return true;
+  }
+
+  // If we are at the end of the currently buffered text, avoid splitting inside a word.
+  // That happens when Codex streaming delta ends mid-token.
+  if after.is_none() {
+    return b.is_whitespace()
+      || b == '.'
+      || b == '!'
+      || b == '?'
+      || b == '…'
+      || b == ':'
+      || b == ';'
+      || b == ')'
+      || b == ']'
+      || b == '}'
+      || b == ',';
+  }
+
+  false
+}
+
+fn find_stream_cut(
+  rem: &str,
+  window_end: usize,
+  min_chars: usize,
+  desired_sentences: usize,
+  force: bool,
+) -> Option<usize> {
   let window = &rem[..window_end];
   let min_byte = byte_index_at_char(rem, min_chars.min(900));
 
   // 1) Prefer a paragraph break.
   if let Some(idx) = window.rfind("\n\n") {
     let cut = idx + 2;
-    if cut >= min_byte && cut > 0 {
-      return cut;
+    if cut >= min_byte && is_safe_chunk_boundary(rem, cut, force) {
+      return Some(cut);
     }
   }
 
@@ -1286,13 +1342,13 @@ fn find_natural_cut(rem: &str, window_end: usize, min_chars: usize, desired_sent
   for m in list_markers {
     if let Some(idx) = window.rfind(m) {
       let cut = idx + 1; // keep '\n' at end of previous chunk
-      if cut >= min_byte && cut > 0 {
+      if cut >= min_byte && is_safe_chunk_boundary(rem, cut, force) {
         best_list_cut = Some(best_list_cut.map(|b| b.max(cut)).unwrap_or(cut));
       }
     }
   }
   if let Some(cut) = best_list_cut {
-    return cut;
+    return Some(cut);
   }
 
   // 3) Cut after N completed sentences if possible.
@@ -1310,12 +1366,12 @@ fn find_natural_cut(rem: &str, window_end: usize, min_chars: usize, desired_sent
     let mut candidate: Option<usize> = None;
     for (idx, end) in sentence_ends.iter().enumerate() {
       let have = idx + 1;
-      if have >= desired_sentences && *end >= min_byte {
+      if have >= desired_sentences && *end >= min_byte && is_safe_chunk_boundary(rem, *end, force) {
         candidate = Some(*end);
       }
     }
     if let Some(c) = candidate {
-      return c.min(window_end);
+      return Some(c.min(window_end));
     }
   }
 
@@ -1329,12 +1385,19 @@ fn find_natural_cut(rem: &str, window_end: usize, min_chars: usize, desired_sent
     }
     if let Some(i) = last_ws {
       if i > 0 {
-        return i;
+        if is_safe_chunk_boundary(rem, i, force) {
+          return Some(i);
+        }
       }
     }
   }
 
-  window_end
+  // 5) As a last resort, only cut at the window edge when forcing (turn completed).
+  if force && window_end >= min_byte && is_safe_chunk_boundary(rem, window_end, true) {
+    return Some(window_end);
+  }
+
+  None
 }
 
 fn load_chat_threads(app: &AppHandle) -> (Option<PathBuf>, HashMap<i64, String>) {

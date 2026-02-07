@@ -25,9 +25,7 @@ export function TelegramView({ tokenStored, telegramRunning, allowedChatsCount }
         <CardHeader className="flex flex-row items-start justify-between space-y-0">
           <div className="space-y-1">
             <CardTitle>Telegram</CardTitle>
-            <CardDescription>
-              Long polling via getUpdates (later). Token/allowlist/config is hidden behind settings.
-            </CardDescription>
+            <CardDescription />
           </div>
 
           <Dialog>
@@ -39,53 +37,53 @@ export function TelegramView({ tokenStored, telegramRunning, allowedChatsCount }
 
             <DialogContent className="max-w-xl">
               <DialogHeader>
-                <DialogTitle>Telegram Settings</DialogTitle>
+                <DialogTitle>Налаштування Telegram</DialogTitle>
                 <DialogDescription>
-                  Add token once, configure allowlist and polling, then close. Token will not be shown after saving.
+                  Додайте токен, налаштуйте доступ і закрийте.
                 </DialogDescription>
               </DialogHeader>
 
               <div className="space-y-4">
                 <Card>
                   <CardHeader>
-                    <CardTitle>Token</CardTitle>
-                    <CardDescription>Stored in OS keychain / credential manager (later).</CardDescription>
+                    <CardTitle>Токен</CardTitle>
+                    <CardDescription>Зберігається безпечно (згодом через системне сховище).</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="text-sm text-muted-foreground">
-                      Status: <span className="text-foreground font-medium">{tokenStored ? 'stored' : 'missing'}</span>
+                      Статус: <span className="text-foreground font-medium">{tokenStored ? 'збережено' : 'нема'}</span>
                     </div>
-                    <Input placeholder="Paste bot token (will not be shown after save)" />
+                    <Input placeholder="Вставте токен бота" />
                     <div className="flex gap-2">
-                      <Button>Save token</Button>
-                      <Button variant="outline">Delete token</Button>
+                      <Button>Зберегти</Button>
+                      <Button variant="outline">Видалити</Button>
                     </div>
                   </CardContent>
                 </Card>
 
                 <Card>
                   <CardHeader>
-                    <CardTitle>Allowlist</CardTitle>
-                    <CardDescription>Only these chat IDs can use privileged commands.</CardDescription>
+                    <CardTitle>Доступ</CardTitle>
+                    <CardDescription>Хто може користуватись ботом.</CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <div className="text-sm text-muted-foreground">
-                      Stage 0 placeholder. We will add CRUD and display `chat_id` flow with `/whoami`.
+                      Поки що заглушка. Додамо зручне керування списком і команду `/whoami`.
                     </div>
                     <div className="flex gap-2">
-                      <Input placeholder="Add chat_id (e.g. 123456789)" />
-                      <Button variant="outline">Add</Button>
+                      <Input placeholder="Додати chat_id (наприклад 123456789)" />
+                      <Button variant="outline">Додати</Button>
                     </div>
                   </CardContent>
                 </Card>
 
                 <Card>
                   <CardHeader>
-                    <CardTitle>Polling</CardTitle>
-                    <CardDescription>Timeout and offset persistence (later).</CardDescription>
+                    <CardTitle>Параметри</CardTitle>
+                    <CardDescription />
                   </CardHeader>
                   <CardContent className="space-y-3">
-                    <Input placeholder="pollTimeoutSec (e.g. 20)" />
+                    <Input placeholder="Timeout (наприклад 20)" />
                   </CardContent>
                 </Card>
               </div>
@@ -96,22 +94,26 @@ export function TelegramView({ tokenStored, telegramRunning, allowedChatsCount }
         <CardContent className="space-y-3">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm text-muted-foreground">
             <div>
-              Bot status:{' '}
-              <span className="text-foreground font-medium">{telegramRunning ? 'running' : 'stopped'}</span>
+              Статус:{' '}
+              <span className="text-foreground font-medium">{telegramRunning ? 'працює' : 'зупинено'}</span>
             </div>
             <div>
-              Token:{' '}
-              <span className="text-foreground font-medium">{tokenStored ? 'stored' : 'missing'}</span>
+              Токен:{' '}
+              <span className="text-foreground font-medium">{tokenStored ? 'є' : 'нема'}</span>
             </div>
             <div>
-              Allowed chats:{' '}
+              Доступ:{' '}
               <span className="text-foreground font-medium">{allowedChatsCount}</span>
             </div>
           </div>
 
           <div className="flex gap-2">
-            <Button variant="outline">Start</Button>
-            <Button variant="outline">Stop</Button>
+            <Button variant="outline" disabled title="Недоступно в бета-версії">
+              Запустити
+            </Button>
+            <Button variant="outline" disabled title="Недоступно в бета-версії">
+              Зупинити
+            </Button>
           </div>
         </CardContent>
       </Card>

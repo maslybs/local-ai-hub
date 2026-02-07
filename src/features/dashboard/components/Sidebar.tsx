@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrainCircuit, Cable, Database, LayoutDashboard, Settings, Sparkles } from 'lucide-react';
+import { BrainCircuit, Cable, Database, LayoutDashboard, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { View } from '../types';
 import { StatusIndicator } from './StatusIndicator';
@@ -26,7 +26,7 @@ export function Sidebar({ view, onViewChange, telegramRunning, codexReady }: Sid
   ];
 
   return (
-    <aside className="w-60 border-r bg-card flex flex-col">
+    <aside className="w-60 border-r bg-card/75 backdrop-blur-xl flex flex-col">
       <div className="p-5 border-b">
         <h1 className="font-bold text-lg leading-tight">
           Local AI Hub
@@ -54,14 +54,9 @@ export function Sidebar({ view, onViewChange, telegramRunning, codexReady }: Sid
       </nav>
 
       <div className="p-3 border-t">
-        <button
-          className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-colors text-[15px]"
-          title="Settings will be added in later stages"
-          type="button"
-        >
-          <Settings className="h-5 w-5" />
-          <span>Settings</span>
-        </button>
+        <div className="px-4 py-2 text-xs text-muted-foreground">
+          Beta
+        </div>
       </div>
     </aside>
   );

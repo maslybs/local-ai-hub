@@ -1,6 +1,7 @@
 import React from 'react';
+import { MessageCircle } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 import { TelegramView } from './TelegramView';
 
 type ConnectorsViewProps = {
@@ -10,43 +11,85 @@ type ConnectorsViewProps = {
 };
 
 export function ConnectorsView({ tokenStored, telegramRunning, allowedChatsCount }: ConnectorsViewProps) {
-  const [tab, setTab] = React.useState<'telegram' | 'coming_soon'>('telegram');
+  const [selected, setSelected] = React.useState<'telegram' | 'coming_soon'>('telegram');
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold">Connectors</h2>
         <p className="text-muted-foreground">
-          External interfaces that can trigger local jobs. Telegram is the first connector; more will be added here.
+          Підключення зовнішніх інтерфейсів. Зараз є Telegram, згодом додамо інші.
         </p>
       </div>
 
-      <div className="space-y-4">
-        <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
-          <TabsList>
-            <TabsTrigger value="telegram">Telegram</TabsTrigger>
-            <TabsTrigger value="coming_soon">More Connectors</TabsTrigger>
-          </TabsList>
+      <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
+        <Card>
+          <CardHeader>
+            <CardTitle>Конектори</CardTitle>
+            <CardDescription />
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <button
+              type="button"
+              onClick={() => setSelected('telegram')}
+              className={cn(
+                'w-full rounded-lg border p-3 text-left transition-colors',
+                selected === 'telegram' ? 'bg-muted' : 'hover:bg-muted/60'
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <MessageCircle className="h-4 w-4 text-muted-foreground" />
+                <div className="font-medium">Telegram</div>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Керування через Telegram-бота.
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                Статус:{' '}
+                <span className="text-foreground font-medium">
+                  {telegramRunning ? 'працює' : 'зупинено'}
+                </span>
+              </div>
+            </button>
 
-          <TabsContent value="telegram" className="pt-4">
+            <button
+              type="button"
+              onClick={() => setSelected('coming_soon')}
+              className={cn(
+                'w-full rounded-lg border p-3 text-left transition-colors',
+                selected === 'coming_soon' ? 'bg-muted' : 'hover:bg-muted/60'
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <div className="font-medium">Додати конектор</div>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Недоступно в бета-версії.
+              </div>
+            </button>
+          </CardContent>
+        </Card>
+
+        <div className="min-w-0">
+          {selected === 'telegram' && (
             <TelegramView
               tokenStored={tokenStored}
               telegramRunning={telegramRunning}
               allowedChatsCount={allowedChatsCount}
             />
-          </TabsContent>
+          )}
 
-          <TabsContent value="coming_soon" className="pt-4">
+          {selected === 'coming_soon' && (
             <Card>
               <CardHeader>
-                <CardTitle>More Connectors</CardTitle>
-                <CardDescription>Slack/Discord/CLI/Webhooks etc. (later).</CardDescription>
+                <CardTitle>Інші конектори</CardTitle>
+                <CardDescription>Недоступно в бета-версії.</CardDescription>
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
-                This area will become a connector list with enable/disable, per-connector settings, and status badges.
+                Недоступно в бета-версії.
               </CardContent>
             </Card>
-          </TabsContent>
-        </Tabs>
+          )}
+        </div>
       </div>
     </div>
   );

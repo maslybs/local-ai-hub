@@ -11,15 +11,13 @@ export function LogsJobsView() {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold">Logs & Jobs</h2>
-        <p className="text-muted-foreground">
-          Stage 0 placeholder. In later stages this view will subscribe to backend events and show job history.
-        </p>
+        <p className="text-muted-foreground">Недоступно в бета-версії.</p>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle>Logs</CardTitle>
-          <CardDescription>Event stream (info/warn/error) with filters (later).</CardDescription>
+          <CardDescription />
         </CardHeader>
         <CardContent className="space-y-2">
           {sample.map((l, idx) => (
@@ -33,4 +31,3 @@ export function LogsJobsView() {
     </div>
   );
 }
-

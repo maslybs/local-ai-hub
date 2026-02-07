@@ -1,9 +1,8 @@
 import React from 'react';
-import { FileText, Moon, Sun } from 'lucide-react';
+import { Moon, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Theme } from '../hooks/useTheme';
 import { View } from '../types';
-import { StatusIndicator } from './StatusIndicator';
 
 type DashboardHeaderProps = {
   view: View;
@@ -11,9 +10,6 @@ type DashboardHeaderProps = {
   onThemeToggle: () => void;
   onOpenLogs: () => void;
   logsOpen: boolean;
-  telegramRunning: boolean;
-  tokenStored: boolean;
-  codexReady: boolean;
 };
 
 function titleForView(view: View) {
@@ -39,37 +35,19 @@ export function DashboardHeader({
   onThemeToggle,
   onOpenLogs,
   logsOpen,
-  telegramRunning,
-  tokenStored,
-  codexReady,
 }: DashboardHeaderProps) {
   return (
     <header className="h-14 border-b flex items-center justify-between px-6">
       <div className="flex items-center gap-4">
         <div className="font-semibold">{titleForView(view)}</div>
-        <div className="hidden md:flex items-center gap-3 text-sm text-muted-foreground">
-          <span className="inline-flex items-center gap-2">
-            <StatusIndicator active={telegramRunning} />
-            Telegram
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <StatusIndicator active={tokenStored} />
-            Token
-          </span>
-          <span className="inline-flex items-center gap-2">
-            <StatusIndicator active={codexReady} />
-            Codex
-          </span>
-        </div>
       </div>
       <div className="flex items-center gap-2">
         <Button
           variant={logsOpen ? 'secondary' : 'ghost'}
-          size="icon"
           onClick={onOpenLogs}
-          title="Open logs"
+          size="sm"
         >
-          <FileText className="h-5 w-5" />
+          Logs
         </Button>
         <Button variant="ghost" size="icon" onClick={onThemeToggle} title="Toggle theme">
           {theme === 'light' ? <Moon className="h-5 w-5" /> : <Sun className="h-5 w-5" />}

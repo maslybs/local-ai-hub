@@ -1,6 +1,6 @@
 import React from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 import { CodexView } from './CodexView';
 
 type AiCoreViewProps = {
@@ -8,40 +8,77 @@ type AiCoreViewProps = {
 };
 
 export function AiCoreView({ codexReady }: AiCoreViewProps) {
-  const [tab, setTab] = React.useState<'codex' | 'coming_soon'>('codex');
+  const [selected, setSelected] = React.useState<'codex' | 'coming_soon'>('codex');
   return (
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold">AI Core</h2>
         <p className="text-muted-foreground">
-          The core AI runtime and shared configuration. Codex is the first core module.
+          Центральний розділ з AI. Тут з часом зʼявляться інші моделі, але починаємо з Codex.
         </p>
       </div>
 
-      <div className="space-y-4">
-        <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
-          <TabsList>
-            <TabsTrigger value="codex">Codex</TabsTrigger>
-            <TabsTrigger value="coming_soon">More AIs</TabsTrigger>
-          </TabsList>
+      <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
+        <Card>
+          <CardHeader>
+            <CardTitle>AI</CardTitle>
+            <CardDescription />
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <button
+              type="button"
+              onClick={() => setSelected('codex')}
+              className={cn(
+                'w-full rounded-lg border p-3 text-left transition-colors',
+                selected === 'codex' ? 'bg-muted' : 'hover:bg-muted/60'
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <div className="font-medium">Codex</div>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Основний AI-помічник для роботи з вашим проєктом.
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                Статус:{' '}
+                <span className="text-foreground font-medium">
+                  {codexReady ? 'готово' : 'не налаштовано'}
+                </span>
+              </div>
+            </button>
 
-          <TabsContent value="codex" className="pt-4">
-            <CodexView codexReady={codexReady} />
-          </TabsContent>
+            <button
+              type="button"
+              onClick={() => setSelected('coming_soon')}
+              className={cn(
+                'w-full rounded-lg border p-3 text-left transition-colors',
+                selected === 'coming_soon' ? 'bg-muted' : 'hover:bg-muted/60'
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <div className="font-medium">Додати AI</div>
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Недоступно в бета-версії.
+              </div>
+            </button>
+          </CardContent>
+        </Card>
 
-          <TabsContent value="coming_soon" className="pt-4">
+        <div className="min-w-0">
+          {selected === 'codex' && <CodexView codexReady={codexReady} />}
+          {selected === 'coming_soon' && (
             <Card>
               <CardHeader>
-                <CardTitle>More Core AIs</CardTitle>
-                <CardDescription>Place for additional AI cores (later).</CardDescription>
+                <CardTitle>Інші AI</CardTitle>
+                <CardDescription>Недоступно в бета-версії.</CardDescription>
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
-                This section will host additional AI modules alongside Codex. The UI will become a list of installed cores
-                with per-core settings.
+                Недоступно в бета-версії.
               </CardContent>
             </Card>
-          </TabsContent>
-        </Tabs>
+          )}
+        </div>
       </div>
     </div>
   );

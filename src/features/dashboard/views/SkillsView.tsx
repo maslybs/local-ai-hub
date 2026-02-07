@@ -6,21 +6,18 @@ export function SkillsView() {
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold">Skills</h2>
-        <p className="text-muted-foreground">
-          Shared skill registry that should be available to all connected AIs and connectors (later).
-        </p>
+        <p className="text-muted-foreground">Недоступно в бета-версії.</p>
       </div>
 
       <Card>
         <CardHeader>
           <CardTitle>Skill Sources</CardTitle>
-          <CardDescription>Local and remote sources (later).</CardDescription>
+          <CardDescription />
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          Placeholder. This will list installed skills and allow enabling/disabling per AI.
+          Недоступно в бета-версії.
         </CardContent>
       </Card>
     </div>
   );
 }
-

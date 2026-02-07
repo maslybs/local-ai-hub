@@ -22,7 +22,7 @@ export function Dashboard() {
   const [codexReady] = React.useState(false);
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="flex h-screen app-ambient">
       <Sidebar
         view={view}
         onViewChange={setView}
@@ -37,9 +37,6 @@ export function Dashboard() {
           onThemeToggle={toggleTheme}
           onOpenLogs={() => setView(v => (v === 'logs' ? 'overview' : 'logs'))}
           logsOpen={view === 'logs'}
-          telegramRunning={telegramRunning}
-          tokenStored={tokenStored}
-          codexReady={codexReady}
         />
 
         <main className="flex-1 overflow-y-auto p-8">

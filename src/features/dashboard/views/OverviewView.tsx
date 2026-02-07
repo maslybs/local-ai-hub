@@ -1,5 +1,6 @@
 import React from 'react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { View } from '../types';
 
@@ -20,40 +21,42 @@ export function OverviewView({
 }: OverviewViewProps) {
   return (
     <div className="space-y-6">
-      <div>
+      <div className="flex items-baseline justify-between gap-4">
         <h2 className="text-2xl font-bold">Local AI Hub</h2>
-        <p className="text-muted-foreground">
-          Desktop hub for local connectors and AI core. Stage 0 UI shell is up; next steps will wire Tauri backend and connectors.
-        </p>
+        <Badge variant="secondary">Beta</Badge>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <Card>
           <CardHeader>
             <CardTitle>AI Core</CardTitle>
-            <CardDescription>Core runtime shared by all connectors and skills.</CardDescription>
+            <CardDescription />
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="text-sm text-muted-foreground">
-              <div>Codex: <span className="text-foreground font-medium">{codexReady ? 'ready' : 'not configured'}</span></div>
-              <div>Shared skills: <span className="text-foreground font-medium">0</span></div>
+            <div className="flex items-center gap-2">
+              <Badge variant={codexReady ? 'success' : 'warning'}>
+                {codexReady ? 'Codex ready' : 'Setup needed'}
+              </Badge>
+              <Badge variant="outline">Skills: 0</Badge>
             </div>
-            <Button variant="outline" onClick={() => onNavigate('ai_core')}>Open AI Core</Button>
+            <Button variant="outline" onClick={() => onNavigate('ai_core')}>Open</Button>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle>Connectors</CardTitle>
-            <CardDescription>External interfaces (Telegram now, more later).</CardDescription>
+            <CardDescription />
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="text-sm text-muted-foreground">
-              <div>Telegram running: <span className="text-foreground font-medium">{telegramRunning ? 'yes' : 'no'}</span></div>
-              <div>Token stored: <span className="text-foreground font-medium">{tokenStored ? 'yes' : 'no'}</span></div>
-              <div>Allowed chats: <span className="text-foreground font-medium">{allowedChatsCount}</span></div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant={telegramRunning ? 'success' : 'secondary'}>
+                Telegram {telegramRunning ? 'on' : 'off'}
+              </Badge>
+              <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? 'Token set' : 'Token missing'}</Badge>
+              <Badge variant="outline">Allowed: {allowedChatsCount}</Badge>
             </div>
-            <Button variant="outline" onClick={() => onNavigate('connectors')}>Open Connectors</Button>
+            <Button variant="outline" onClick={() => onNavigate('connectors')}>Open</Button>
           </CardContent>
         </Card>
       </div>
@@ -62,28 +65,27 @@ export function OverviewView({
         <Card>
           <CardHeader>
             <CardTitle>Skills</CardTitle>
-            <CardDescription>Reusable skills available across connected AIs.</CardDescription>
+            <CardDescription />
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="text-sm text-muted-foreground">
-              <div>Installed: <span className="text-foreground font-medium">0</span></div>
-              <div>Enabled: <span className="text-foreground font-medium">0</span></div>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline">Installed: 0</Badge>
+              <Badge variant="outline">Enabled: 0</Badge>
             </div>
-            <Button variant="outline" onClick={() => onNavigate('skills')}>Open Skills</Button>
+            <Button variant="outline" onClick={() => onNavigate('skills')}>Open</Button>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle>Memory</CardTitle>
-            <CardDescription>Local database and data management.</CardDescription>
+            <CardDescription />
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="text-sm text-muted-foreground">
-              <div>Storage: <span className="text-foreground font-medium">not configured</span></div>
-              <div>Items: <span className="text-foreground font-medium">0</span></div>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary">Unavailable in beta</Badge>
             </div>
-            <Button variant="outline" onClick={() => onNavigate('memory')}>Open Memory</Button>
+            <Button variant="outline" onClick={() => onNavigate('memory')}>Open</Button>
           </CardContent>
         </Card>
       </div>

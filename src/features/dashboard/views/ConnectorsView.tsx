@@ -3,11 +3,12 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { TelegramView } from './TelegramView';
-import type { AppConfig } from '@/lib/backend';
+import type { AppConfig, TelegramStatus } from '@/lib/backend';
 
 type ConnectorsViewProps = {
   tokenStored: boolean;
   telegramRunning: boolean;
+  telegramStatus: TelegramStatus | null;
   allowedChatsCount: number;
   config: AppConfig | null;
   onConfigChange: (cfg: AppConfig) => Promise<void>;
@@ -19,6 +20,7 @@ type ConnectorsViewProps = {
 export function ConnectorsView({
   tokenStored,
   telegramRunning,
+  telegramStatus,
   allowedChatsCount,
   config,
   onConfigChange,
@@ -81,6 +83,7 @@ export function ConnectorsView({
             <TelegramView
               tokenStored={tokenStored}
               telegramRunning={telegramRunning}
+              telegramStatus={telegramStatus}
               allowedChatsCount={allowedChatsCount}
               config={config}
               onConfigChange={onConfigChange}

@@ -28,6 +28,15 @@ export type TelegramStatus = {
   last_error: string | null;
 };
 
+export type LogLevel = 'info' | 'warn' | 'error';
+
+export type LogEntry = {
+  ts_unix_ms: number;
+  level: LogLevel;
+  source: string;
+  msg: string;
+};
+
 export type SecretStatus = {
   stored: boolean;
   error: string | null;
@@ -38,6 +47,9 @@ export type CodexStatus = {
   running: boolean;
   initialized: boolean;
   last_error: string | null;
+  auth_mode: 'apikey' | 'chatgpt' | null;
+  login_url: string | null;
+  login_id: string | null;
 };
 
 export const backend = {
@@ -54,6 +66,16 @@ export const backend = {
   async saveConfig(cfg: AppConfig): Promise<void> {
     const invoke = await getInvoke();
     await invoke<void>('save_config', { cfg });
+  },
+
+  async logsList(limit = 200): Promise<LogEntry[]> {
+    const invoke = await getInvoke();
+    return invoke<LogEntry[]>('logs_list', { limit });
+  },
+
+  async logsClear(): Promise<void> {
+    const invoke = await getInvoke();
+    await invoke<void>('logs_clear');
   },
 
   async telegramTokenStatus(): Promise<SecretStatus> {
@@ -94,5 +116,25 @@ export const backend = {
   async codexStatus(): Promise<CodexStatus> {
     const invoke = await getInvoke();
     return invoke<CodexStatus>('codex_status');
+  },
+
+  async codexConnect(): Promise<CodexStatus> {
+    const invoke = await getInvoke();
+    return invoke<CodexStatus>('codex_connect');
+  },
+
+  async codexStop(): Promise<void> {
+    const invoke = await getInvoke();
+    await invoke<void>('codex_stop');
+  },
+
+  async codexLoginChatgpt(): Promise<CodexStatus> {
+    const invoke = await getInvoke();
+    return invoke<CodexStatus>('codex_login_chatgpt');
+  },
+
+  async codexLogout(): Promise<void> {
+    const invoke = await getInvoke();
+    await invoke<void>('codex_logout');
   },
 };

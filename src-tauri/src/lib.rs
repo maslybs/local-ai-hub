@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use crate::{
   connectors::telegram::runtime::TelegramRuntime,
   connectors::codex::runtime::CodexRuntime,
-  core::{config_store, paths, secrets},
+  core::{config_store, logbus, paths, secrets},
 };
 
 #[derive(Clone)]
@@ -17,6 +17,7 @@ struct AppState {
   config: Arc<RwLock<config_store::AppConfig>>,
   telegram: TelegramRuntime,
   codex: CodexRuntime,
+  logs: logbus::LogBus,
 }
 
 #[tauri::command]
@@ -37,6 +38,17 @@ async fn save_config(app: AppHandle, state: State<'_, AppState>, cfg: config_sto
   }
   let path = paths::config_path(&app)?;
   config_store::save_config(&path, &cfg)
+}
+
+#[tauri::command]
+async fn logs_list(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<logbus::LogEntry>, String> {
+  Ok(state.logs.list(limit.unwrap_or(200)))
+}
+
+#[tauri::command]
+async fn logs_clear(state: State<'_, AppState>) -> Result<(), String> {
+  state.logs.clear();
+  Ok(())
 }
 
 #[tauri::command]
@@ -99,17 +111,26 @@ pub fn run() {
 
       let cfg = load_or_default_config(&app.handle());
       let cfg = Arc::new(RwLock::new(cfg));
-      let codex = CodexRuntime::new();
-      let telegram = TelegramRuntime::new(cfg.clone(), codex.clone());
+      let logs = logbus::LogBus::new(1200);
+      logs.push(logbus::LogLevel::Info, "app", "startup");
 
-      app.manage(AppState { config: cfg, telegram, codex });
+      let codex = CodexRuntime::new(&app.handle(), logs.clone());
+      let telegram = TelegramRuntime::new(cfg.clone(), codex.clone(), logs.clone());
+
+      app.manage(AppState { config: cfg, telegram, codex, logs });
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
       ping,
       get_config,
       save_config,
+      logs_list,
+      logs_clear,
       codex_status,
+      codex_connect,
+      codex_stop,
+      codex_login_chatgpt,
+      codex_logout,
       telegram_token_status,
       telegram_set_token,
       telegram_delete_token,
@@ -124,4 +145,26 @@ pub fn run() {
 #[tauri::command]
 async fn codex_status(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexStatus, String> {
   Ok(state.codex.status().await)
+}
+
+#[tauri::command]
+async fn codex_connect(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexStatus, String> {
+  state.codex.connect().await?;
+  Ok(state.codex.status().await)
+}
+
+#[tauri::command]
+async fn codex_stop(state: State<'_, AppState>) -> Result<(), String> {
+  state.codex.stop().await
+}
+
+#[tauri::command]
+async fn codex_login_chatgpt(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexStatus, String> {
+  let _ = state.codex.login_chatgpt().await?;
+  Ok(state.codex.status().await)
+}
+
+#[tauri::command]
+async fn codex_logout(state: State<'_, AppState>) -> Result<(), String> {
+  state.codex.logout().await
 }

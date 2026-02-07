@@ -1,6 +1,8 @@
 use std::{
   collections::{HashMap, HashSet},
+  fs,
   process::Stdio,
+  path::PathBuf,
   sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -9,6 +11,7 @@ use std::{
 };
 
 use serde_json::Value;
+use tauri::AppHandle;
 use tokio::{
   io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
   process::{Child, ChildStdin, Command},
@@ -16,6 +19,7 @@ use tokio::{
 };
 
 use super::types::CodexStatus;
+use crate::core::{logbus, paths};
 
 #[derive(Clone)]
 pub struct CodexRuntime {
@@ -30,7 +34,10 @@ struct Inner {
   pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
   pending_turns: Mutex<HashMap<String, PendingTurn>>,
   chat_threads: Mutex<HashMap<i64, String>>,
+  resumed_threads: Mutex<HashSet<String>>,
   busy_chats: Mutex<HashSet<i64>>,
+  chat_threads_path: Option<PathBuf>,
+  logs: logbus::LogBus,
 }
 
 struct PendingTurn {
@@ -40,7 +47,8 @@ struct PendingTurn {
 }
 
 impl CodexRuntime {
-  pub fn new() -> Self {
+  pub fn new(app: &AppHandle, logs: logbus::LogBus) -> Self {
+    let (chat_threads_path, chat_threads) = load_chat_threads(app);
     Self {
       inner: Arc::new(Inner {
         status: RwLock::new(CodexStatus::default()),
@@ -49,8 +57,11 @@ impl CodexRuntime {
         next_id: AtomicU64::new(1),
         pending: Mutex::new(HashMap::new()),
         pending_turns: Mutex::new(HashMap::new()),
-        chat_threads: Mutex::new(HashMap::new()),
+        chat_threads: Mutex::new(chat_threads),
+        resumed_threads: Mutex::new(HashSet::new()),
         busy_chats: Mutex::new(HashSet::new()),
+        chat_threads_path,
+        logs,
       }),
     }
   }
@@ -73,6 +84,52 @@ impl CodexRuntime {
       st.running = false;
       st.initialized = false;
     }
+    self.inner.logs.push(logbus::LogLevel::Info, "codex", "stopped");
+    Ok(())
+  }
+
+  pub async fn connect(&self) -> Result<(), String> {
+    self.ensure_initialized().await
+  }
+
+  pub async fn login_chatgpt(&self) -> Result<(String, String), String> {
+    self.ensure_initialized().await?;
+    self.inner.logs.push(logbus::LogLevel::Info, "codex", "login_chatgpt: start");
+    let params = serde_json::json!({ "type": "chatgpt" });
+    let res = self.send_request("account/login/start", params).await?;
+
+    let auth_url = res
+      .get("authUrl")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| "login response missing authUrl".to_string())?
+      .to_string();
+    let login_id = res
+      .get("loginId")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| "login response missing loginId".to_string())?
+      .to_string();
+
+    {
+      let mut st = self.inner.status.write().await;
+      st.login_url = Some(auth_url.clone());
+      st.login_id = Some(login_id.clone());
+      st.last_error = None;
+    }
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Info, "codex", "login_chatgpt: auth url received");
+
+    Ok((auth_url, login_id))
+  }
+
+  pub async fn logout(&self) -> Result<(), String> {
+    self.ensure_initialized().await?;
+    let _ = self.send_request("account/logout", Value::Null).await?;
+    let mut st = self.inner.status.write().await;
+    st.auth_mode = None;
+    st.login_url = None;
+    st.login_id = None;
     Ok(())
   }
 
@@ -81,6 +138,7 @@ impl CodexRuntime {
       return Ok(());
     }
 
+    self.inner.logs.push(logbus::LogLevel::Info, "codex", "starting app-server");
     let mut cmd = Command::new("codex");
     cmd
       .arg("app-server")
@@ -101,6 +159,7 @@ impl CodexRuntime {
       st.initialized = false;
       st.last_error = None;
     }
+    self.inner.logs.push(logbus::LogLevel::Info, "codex", "app-server running");
 
     let inner = self.inner.clone();
     tauri::async_runtime::spawn(async move {
@@ -143,6 +202,7 @@ impl CodexRuntime {
       return Ok(());
     }
 
+    self.inner.logs.push(logbus::LogLevel::Info, "codex", "initialize");
     let params = serde_json::json!({
       "clientInfo": {
         "name": "local-ai-hub",
@@ -154,6 +214,7 @@ impl CodexRuntime {
 
     let mut st = self.inner.status.write().await;
     st.initialized = true;
+    self.inner.logs.push(logbus::LogLevel::Info, "codex", "initialized");
     Ok(())
   }
 
@@ -182,6 +243,10 @@ impl CodexRuntime {
     self.ensure_initialized().await?;
 
     let thread_id = self.thread_for_chat(chat_id).await?;
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Info, "codex", format!("turn/start chat_id={chat_id}"));
 
     let params = serde_json::json!({
       "threadId": thread_id,
@@ -227,11 +292,17 @@ impl CodexRuntime {
 
   async fn thread_for_chat(&self, chat_id: i64) -> Result<String, String> {
     if let Some(t) = self.inner.chat_threads.lock().await.get(&chat_id).cloned() {
+      self.resume_thread_if_needed(&t).await?;
       return Ok(t);
     }
 
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Info, "codex", format!("thread/start chat_id={chat_id}"));
     let params = serde_json::json!({
-      "approvalPolicy": "never"
+      "approvalPolicy": "never",
+      "sandbox": "read-only"
     });
     let res = self.send_request("thread/start", params).await?;
     let thread_id = res
@@ -241,8 +312,38 @@ impl CodexRuntime {
       .ok_or_else(|| "thread/start response missing thread.id".to_string())?
       .to_string();
 
-    self.inner.chat_threads.lock().await.insert(chat_id, thread_id.clone());
+    {
+      let mut guard = self.inner.chat_threads.lock().await;
+      guard.insert(chat_id, thread_id.clone());
+      persist_chat_threads(self.inner.chat_threads_path.as_ref(), &guard)?;
+    }
     Ok(thread_id)
+  }
+
+  async fn resume_thread_if_needed(&self, thread_id: &str) -> Result<(), String> {
+    let thread_id = thread_id.to_string();
+    {
+      let resumed = self.inner.resumed_threads.lock().await;
+      if resumed.contains(&thread_id) {
+        return Ok(());
+      }
+    }
+
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Info, "codex", format!("thread/resume thread_id={}", thread_id));
+    // Resume is required after server restart to load the stored thread context.
+    let params = serde_json::json!({
+      "threadId": thread_id,
+      "approvalPolicy": "never",
+      "sandbox": "read-only"
+    });
+    let _ = self.send_request("thread/resume", params).await?;
+
+    let mut resumed = self.inner.resumed_threads.lock().await;
+    resumed.insert(thread_id);
+    Ok(())
   }
 
   async fn send_notification(&self, method: &str, params: Option<Value>) -> Result<(), String> {
@@ -336,6 +437,27 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
   let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
   match method {
+    "account/updated" => {
+      let auth_mode = params.get("authMode").and_then(|v| v.as_str()).map(|s| s.to_string());
+      let mut st = inner.status.write().await;
+      st.auth_mode = auth_mode;
+    }
+    "account/login/completed" => {
+      let success = params.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+      let login_id = params.get("loginId").and_then(|v| v.as_str()).map(|s| s.to_string());
+      let err = params.get("error").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+      let mut st = inner.status.write().await;
+      if let Some(id) = login_id {
+        if st.login_id.as_deref() == Some(id.as_str()) {
+          st.login_url = None;
+          st.login_id = None;
+        }
+      }
+      if !success {
+        st.last_error = Some(err.unwrap_or_else(|| "Login failed".to_string()));
+      }
+    }
     "item/completed" => {
       let turn_id = params.get("turnId").and_then(|v| v.as_str()).unwrap_or("").to_string();
       if turn_id.is_empty() {
@@ -386,4 +508,44 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
     }
     _ => {}
   }
+}
+
+fn load_chat_threads(app: &AppHandle) -> (Option<PathBuf>, HashMap<i64, String>) {
+  let path = paths::codex_chat_threads_path(app).ok();
+  let mut map = HashMap::<i64, String>::new();
+  let Some(path2) = path.clone() else {
+    return (None, map);
+  };
+  if !path2.exists() {
+    return (Some(path2), map);
+  }
+  match fs::read_to_string(&path2) {
+    Ok(raw) => match serde_json::from_str::<HashMap<i64, String>>(&raw) {
+      Ok(m) => {
+        map = m;
+      }
+      Err(e) => {
+        log::info!("codex: failed to parse chat threads state: {e}");
+      }
+    },
+    Err(e) => {
+      log::info!("codex: failed to read chat threads state: {e}");
+    }
+  }
+  (Some(path2), map)
+}
+
+fn persist_chat_threads(path: Option<&PathBuf>, map: &HashMap<i64, String>) -> Result<(), String> {
+  let Some(path) = path else { return Ok(()); };
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent).map_err(|e| format!("create codex state dir failed: {e}"))?;
+  }
+  let raw = serde_json::to_string_pretty(map).map_err(|e| format!("serialize codex state failed: {e}"))?;
+  fs::write(path, raw).map_err(|e| format!("write codex state failed: {e}"))?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+  }
+  Ok(())
 }

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tauri::AppHandle;
 use tokio::sync::{watch, RwLock};
 
-use crate::core::{config_store::AppConfig, paths, secrets};
+use crate::core::{config_store::AppConfig, logbus, paths, secrets};
 use crate::connectors::codex::runtime::CodexRuntime;
 
 use super::types::{BotState, TelegramStatus};
@@ -20,16 +20,18 @@ struct Inner {
   stop_tx: RwLock<Option<watch::Sender<bool>>>,
   config: Arc<RwLock<AppConfig>>,
   codex: CodexRuntime,
+  logs: logbus::LogBus,
 }
 
 impl TelegramRuntime {
-  pub fn new(config: Arc<RwLock<AppConfig>>, codex: CodexRuntime) -> Self {
+  pub fn new(config: Arc<RwLock<AppConfig>>, codex: CodexRuntime, logs: logbus::LogBus) -> Self {
     Self {
       inner: Arc::new(Inner {
         status: RwLock::new(TelegramStatus::default()),
         stop_tx: RwLock::new(None),
         config,
         codex,
+        logs,
       }),
     }
   }
@@ -50,6 +52,7 @@ impl TelegramRuntime {
       return Err("Telegram token missing".to_string());
     }
 
+    self.inner.logs.push(logbus::LogLevel::Info, "telegram", "start polling");
     let (tx, mut rx) = watch::channel(false);
     *self.inner.stop_tx.write().await = Some(tx);
 
@@ -75,6 +78,11 @@ impl TelegramRuntime {
         Err(e) => {
           let mut st = runtime.inner.status.write().await;
           st.last_error = Some(e);
+          let msg = st.last_error.clone().unwrap_or_default();
+          runtime
+            .inner
+            .logs
+            .push(logbus::LogLevel::Error, "telegram", format!("getMe failed: {msg}"));
         }
       }
 
@@ -108,6 +116,10 @@ impl TelegramRuntime {
               st.last_poll_unix_ms = Some(now_unix_ms());
               st.last_error = None;
             }
+            runtime
+              .inner
+              .logs
+              .push(logbus::LogLevel::Info, "telegram", format!("poll ok: {} updates", items.len()));
 
             // process messages
             for msg in items {
@@ -118,33 +130,68 @@ impl TelegramRuntime {
                 }
 
                 let (cmd, rest) = parse_command(trimmed);
+                runtime
+                  .inner
+                  .logs
+                  .push(logbus::LogLevel::Info, "telegram", format!("msg chat_id={chat_id} cmd={}", cmd.clone().unwrap_or_else(|| "(text)".to_string())));
                 match cmd.as_deref() {
                   Some("/start") => {
                     let body = "Бот підключено.\n\nКоманди:\n/whoami\n/ping";
-                    let _ = tg_send_message(&client, &token, chat_id, body, Some(message_id)).await;
+                    if let Err(e) = tg_send_message(&client, &token, chat_id, body, Some(message_id)).await {
+                      log::info!("telegram: send /start reply failed: {e}");
+                    }
                   }
                   Some("/whoami") => {
                     let body = format!("chat_id: {chat_id}");
-                    let _ = tg_send_message(&client, &token, chat_id, &body, Some(message_id)).await;
+                    if let Err(e) = tg_send_message(&client, &token, chat_id, &body, Some(message_id)).await {
+                      log::info!("telegram: send /whoami reply failed: {e}");
+                    }
                   }
                   Some("/ping") => {
                     let allowed = cfg.telegram.allowed_chat_ids.contains(&chat_id);
                     if allowed {
-                      let _ = tg_send_message(&client, &token, chat_id, "pong", Some(message_id)).await;
+                      if let Err(e) = tg_send_message(&client, &token, chat_id, "pong", Some(message_id)).await {
+                        log::info!("telegram: send /ping reply failed: {e}");
+                      }
                     } else {
-                      let _ = tg_send_message(&client, &token, chat_id, "Нема доступу. Використай /whoami і додай chat_id в allowlist.", Some(message_id)).await;
+                      if let Err(e) = tg_send_message(
+                        &client,
+                        &token,
+                        chat_id,
+                        "Нема доступу. Використай /whoami і додай chat_id в allowlist.",
+                        Some(message_id),
+                      )
+                      .await
+                      {
+                        log::info!("telegram: send /ping deny failed: {e}");
+                      }
                     }
                   }
                   Some("/codex") => {
                     let allowed = cfg.telegram.allowed_chat_ids.contains(&chat_id);
                     if !allowed {
-                      let _ = tg_send_message(&client, &token, chat_id, "Нема доступу. Використай /whoami і додай chat_id в allowlist.", Some(message_id)).await;
+                      if let Err(e) = tg_send_message(
+                        &client,
+                        &token,
+                        chat_id,
+                        "Нема доступу. Використай /whoami і додай chat_id в allowlist.",
+                        Some(message_id),
+                      )
+                      .await
+                      {
+                        log::info!("telegram: send /codex deny failed: {e}");
+                      }
                       continue;
                     }
                     let prompt = match rest {
                       Some(p) if !p.trim().is_empty() => p.trim().to_string(),
                       _ => {
-                        let _ = tg_send_message(&client, &token, chat_id, "Напиши: /codex <повідомлення>", Some(message_id)).await;
+                        if let Err(e) =
+                          tg_send_message(&client, &token, chat_id, "Напиши: /codex <повідомлення>", Some(message_id))
+                            .await
+                        {
+                          log::info!("telegram: send /codex help failed: {e}");
+                        }
                         continue;
                       }
                     };
@@ -152,13 +199,16 @@ impl TelegramRuntime {
                     let client2 = client.clone();
                     let token2 = token.clone();
                     let codex = runtime.inner.codex.clone();
+                    runtime.inner.logs.push(logbus::LogLevel::Info, "telegram", format!("codex request chat_id={chat_id}"));
                     tauri::async_runtime::spawn(async move {
                       let out = match codex.ask_text(chat_id, &prompt).await {
                         Ok(s) => s,
                         Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
                         Err(e) => format!("Codex error: {e}"),
                       };
-                      let _ = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await;
+                      if let Err(e) = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await {
+                        log::info!("telegram: send codex reply failed: {e}");
+                      }
                     });
                   }
                   _ => {}
@@ -172,13 +222,16 @@ impl TelegramRuntime {
                     let client2 = client.clone();
                     let token2 = token.clone();
                     let codex = runtime.inner.codex.clone();
+                    runtime.inner.logs.push(logbus::LogLevel::Info, "telegram", format!("codex request chat_id={chat_id}"));
                     tauri::async_runtime::spawn(async move {
                       let out = match codex.ask_text(chat_id, &prompt).await {
                         Ok(s) => s,
                         Err(e) if e == "Busy" => "Зачекай: обробляю попереднє повідомлення.".to_string(),
                         Err(e) => format!("Codex error: {e}"),
                       };
-                      let _ = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await;
+                      if let Err(e) = tg_send_message(&client2, &token2, chat_id, &out, Some(message_id)).await {
+                        log::info!("telegram: send codex reply failed: {e}");
+                      }
                     });
                   }
                 }
@@ -189,11 +242,16 @@ impl TelegramRuntime {
             if let Err(e) = save_bot_state(&app, &state) {
               let mut st = runtime.inner.status.write().await;
               st.last_error = Some(e);
+              runtime
+                .inner
+                .logs
+                .push(logbus::LogLevel::Error, "telegram", "save bot state failed");
             }
           }
           Err(e) => {
             let mut st = runtime.inner.status.write().await;
             st.last_error = Some(e);
+            runtime.inner.logs.push(logbus::LogLevel::Error, "telegram", format!("poll failed: {}", st.last_error.clone().unwrap_or_default()));
             // backoff a bit
             tokio::time::sleep(Duration::from_millis(800)).await;
           }
@@ -204,6 +262,7 @@ impl TelegramRuntime {
       *runtime.inner.stop_tx.write().await = None;
       let mut st = runtime.inner.status.write().await;
       st.running = false;
+      runtime.inner.logs.push(logbus::LogLevel::Info, "telegram", "stopped");
     });
 
     Ok(())
@@ -276,15 +335,10 @@ async fn tg_get_updates(
   timeout_sec: i64,
 ) -> Result<(i64, Vec<TgUpdate>), String> {
   let url = format!("https://api.telegram.org/bot{token}/getUpdates");
-  let payload = serde_json::json!({
-    "offset": offset,
-    "timeout": timeout_sec,
-    "limit": 50
-  });
-
+  // Use query params for maximum compatibility with the Telegram Bot API.
   let resp = client
-    .post(url)
-    .json(&payload)
+    .get(url)
+    .query(&[("offset", offset), ("timeout", timeout_sec), ("limit", 50_i64)])
     .send()
     .await
     .map_err(|e| format!("getUpdates request failed: {e}"))?;

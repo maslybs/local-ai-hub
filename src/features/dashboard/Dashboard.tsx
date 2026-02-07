@@ -9,7 +9,7 @@ import { LogsJobsView } from './views/LogsJobsView';
 import { MemoryView } from './views/MemoryView';
 import { OverviewView } from './views/OverviewView';
 import { SkillsView } from './views/SkillsView';
-import { backend, type AppConfig } from '@/lib/backend';
+import { backend, type AppConfig, type TelegramStatus } from '@/lib/backend';
 
 export function Dashboard() {
   const { theme, toggle: toggleTheme } = useTheme();
@@ -18,6 +18,7 @@ export function Dashboard() {
 
   const [cfg, setCfg] = React.useState<AppConfig | null>(null);
   const [telegramRunning, setTelegramRunning] = React.useState(false);
+  const [telegramStatus, setTelegramStatus] = React.useState<TelegramStatus | null>(null);
   const [tokenStatus, setTokenStatus] = React.useState<{ stored: boolean; error: string | null }>({
     stored: false,
     error: null,
@@ -37,6 +38,7 @@ export function Dashboard() {
       setCfg(nextCfg);
       setTokenStatus({ stored: Boolean(token?.stored), error: token?.error ?? null });
       setTelegramRunning(Boolean(tgStatus?.running));
+      setTelegramStatus(tgStatus ?? null);
       setCodexReady(Boolean(codex?.initialized));
     } catch {
       // Non-tauri dev (browser) or backend not ready yet; keep UI usable.
@@ -86,6 +88,7 @@ export function Dashboard() {
                 tokenStored={tokenStatus.stored}
                 telegramRunning={telegramRunning}
                 allowedChatsCount={allowedChatsCount}
+                telegramStatus={telegramStatus}
                 config={cfg}
                 onConfigChange={async (next) => {
                   await backend.saveConfig(next);

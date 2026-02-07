@@ -20,3 +20,7 @@ pub fn telegram_bot_state_path(app: &AppHandle) -> Result<PathBuf, String> {
 pub fn telegram_token_fallback_path(app: &AppHandle) -> Result<PathBuf, String> {
   Ok(app_data_dir(app)?.join("telegram-token.txt"))
 }
+
+pub fn codex_chat_threads_path(app: &AppHandle) -> Result<PathBuf, String> {
+  Ok(app_data_dir(app)?.join("codex-chat-threads.json"))
+}

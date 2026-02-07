@@ -12,12 +12,13 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import type { AppConfig } from '@/lib/backend';
+import type { AppConfig, TelegramStatus } from '@/lib/backend';
 import { Switch } from '@/components/ui/switch';
 
 type TelegramViewProps = {
   tokenStored: boolean;
   telegramRunning: boolean;
+  telegramStatus: TelegramStatus | null;
   allowedChatsCount: number;
   config: AppConfig | null;
   onConfigChange: (cfg: AppConfig) => Promise<void>;
@@ -29,6 +30,7 @@ type TelegramViewProps = {
 export function TelegramView({
   tokenStored,
   telegramRunning,
+  telegramStatus,
   allowedChatsCount,
   config,
   onConfigChange,
@@ -48,9 +50,17 @@ export function TelegramView({
 
   const allowedIds = config?.telegram?.allowed_chat_ids ?? [];
   const storageMode = config?.telegram?.token_storage ?? 'keychain';
+  const lastErr = telegramStatus?.last_error ?? null;
+  const lastPoll = telegramStatus?.last_poll_unix_ms ?? null;
 
   return (
     <div className="space-y-4">
+      {lastErr && (
+        <div className="text-sm text-destructive">
+          {lastErr}
+        </div>
+      )}
+
       <div className="rounded-2xl border border-border/60 bg-card/70 backdrop-blur-xl shadow-sm overflow-hidden">
         <div className="flex items-center justify-between px-5 py-4 border-b border-border/50">
           <div className="flex items-center gap-2">
@@ -240,8 +250,18 @@ export function TelegramView({
         </div>
 
         <div className="px-5 py-4 flex items-center justify-between gap-3">
-          <div className="text-sm text-muted-foreground">
-            Allowed: <span className="text-foreground font-medium">{allowedChatsCount}</span>
+          <div className="text-sm text-muted-foreground flex items-center gap-3">
+            <span>
+              Allowed: <span className="text-foreground font-medium">{allowedChatsCount}</span>
+            </span>
+            {typeof lastPoll === 'number' && (
+              <span>
+                Last poll:{' '}
+                <span className="text-foreground font-medium">
+                  {new Date(Number(lastPoll)).toLocaleTimeString()}
+                </span>
+              </span>
+            )}
           </div>
           <div className="flex gap-2">
             <Button

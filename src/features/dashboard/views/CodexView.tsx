@@ -13,12 +13,14 @@ import {
 import { backend } from '@/lib/backend';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { useI18n } from '@/i18n/I18nContext';
 
 type CodexViewProps = {
   codexReady: boolean;
 };
 
 export function CodexView({ codexReady }: CodexViewProps) {
+  const { t } = useI18n();
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
   const [status, setStatus] = React.useState<Awaited<ReturnType<typeof backend.codexStatus>> | null>(null);
@@ -59,8 +61,8 @@ export function CodexView({ codexReady }: CodexViewProps) {
       <div className="flex items-center justify-between px-5 py-4 border-b border-border/50">
         <div className="flex items-center gap-2">
           <div className="text-base font-semibold">Codex</div>
-          <Badge variant={ready ? 'success' : 'warning'}>{ready ? 'Ready' : 'Setup'}</Badge>
-          <Badge variant={authMode ? 'outline' : 'secondary'}>{authMode ?? 'Sign in'}</Badge>
+          <Badge variant={ready ? 'success' : 'warning'}>{ready ? t('codex.ready') : t('codex.setup')}</Badge>
+          <Badge variant={authMode ? 'outline' : 'secondary'}>{authMode ?? t('codex.sign_in')}</Badge>
         </div>
 
         <div className="flex items-center gap-2">
@@ -72,7 +74,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
               setErr(null);
               try {
                 if (!codexInstalled) {
-                  throw new Error('Codex не встановлено. Відкрий налаштування і натисни "Встановити".');
+                  throw new Error(t('codex.not_installed'));
                 }
                 // If already ready, do a real reconnect (stop + connect).
                 // "Connect" alone is idempotent and won't recover a wedged process.
@@ -86,22 +88,22 @@ export function CodexView({ codexReady }: CodexViewProps) {
                 setBusy(false);
               }
             }}
-            title={ready ? 'Перепідключити Codex' : 'Підключити Codex'}
+            title={ready ? t('codex.reconnect') : t('codex.connect')}
           >
-            {busy ? '...' : ready ? 'Перепідключити' : 'Підключити'}
+            {busy ? '...' : ready ? t('codex.reconnect') : t('codex.connect')}
           </Button>
 
           <Dialog>
             <DialogTrigger asChild>
-              <Button variant="ghost" size="icon" title="Налаштування Codex">
+              <Button variant="ghost" size="icon" title={t('codex.settings')}>
                 <Settings2 className="h-5 w-5" />
               </Button>
             </DialogTrigger>
 
             <DialogContent className="max-w-xl">
               <DialogHeader>
-                <DialogTitle>Налаштування Codex</DialogTitle>
-                <DialogDescription>Увійдіть один раз і закрийте.</DialogDescription>
+                <DialogTitle>{t('codex.settings')}</DialogTitle>
+                <DialogDescription />
               </DialogHeader>
 
               <div className="space-y-3">
@@ -109,7 +111,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
 
                 {!codexInstalled && (
                   <div className="rounded-xl bg-muted/20 p-4">
-                    <div className="text-sm font-medium">Codex не встановлено</div>
+                    <div className="text-sm font-medium">{t('codex.not_installed')}</div>
                     <div className="mt-3 flex gap-2">
                       <Button
                         variant="default"
@@ -120,9 +122,9 @@ export function CodexView({ codexReady }: CodexViewProps) {
                           try {
                             const mod = await import('@tauri-apps/plugin-dialog');
                             const ok = await (mod.ask?.(
-                              'Встановити Codex у цю систему? Потрібен Node.js (npm).',
-                              { title: 'Install Codex', kind: 'warning' },
-                            ) ?? Promise.resolve(window.confirm('Встановити Codex? Потрібен Node.js (npm).')));
+                              t('codex.install_confirm_body'),
+                              { title: t('codex.install_confirm_title'), kind: 'warning' },
+                            ) ?? Promise.resolve(window.confirm(t('codex.install_confirm_body'))));
                             if (!ok) return;
 
                             const doc = await backend.codexInstall();
@@ -140,7 +142,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
                           }
                         }}
                       >
-                        Встановити
+                        {t('codex.install')}
                       </Button>
                       <Button
                         variant="outline"
@@ -158,7 +160,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
                           }
                         }}
                       >
-                        Перевірити
+                        {t('codex.check')}
                       </Button>
                     </div>
                     {doctor && (
@@ -174,7 +176,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
                 )}
 
                 <div className="rounded-xl bg-muted/20 p-4">
-                  <div className="text-sm font-medium">Робоча папка</div>
+                  <div className="text-sm font-medium">{t('codex.workspace')}</div>
                   <div className="mt-3 flex gap-2">
                     <Input
                       placeholder="/path/to/project"
@@ -221,14 +223,14 @@ export function CodexView({ codexReady }: CodexViewProps) {
                       }}
                       title="AGENTS.md береться з цієї папки"
                     >
-                      Зберегти
+                      {t('common.save')}
                     </Button>
                   </div>
                 </div>
 
                 <div className="rounded-xl bg-muted/20 p-4 space-y-3">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium">Універсальні інструкції</div>
+                    <div className="text-sm font-medium">{t('codex.universal_instructions')}</div>
                     <Button
                       variant={fallbackOnly ? 'secondary' : 'outline'}
                       size="sm"
@@ -236,7 +238,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
                       onClick={() => setFallbackOnly(v => !v)}
                       title={fallbackOnly ? 'Працює як fallback' : 'Завжди застосовується'}
                     >
-                      {fallbackOnly ? 'Fallback' : 'Always'}
+                      {fallbackOnly ? t('codex.fallback') : t('codex.always')}
                     </Button>
                   </div>
                   <Textarea
@@ -249,8 +251,8 @@ export function CodexView({ codexReady }: CodexViewProps) {
 
                 <div className="rounded-xl bg-muted/20 p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium">Акаунт</div>
-                    <Badge variant={authMode ? 'success' : 'secondary'}>{authMode ?? 'нема'}</Badge>
+                    <div className="text-sm font-medium">{t('codex.account')}</div>
+                    <Badge variant={authMode ? 'success' : 'secondary'}>{authMode ?? t('common.missing')}</Badge>
                   </div>
 
                   <div className="mt-3 flex gap-2">
@@ -262,7 +264,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
                         setErr(null);
                         try {
                           if (!codexInstalled) {
-                            throw new Error('Спочатку встанови Codex.');
+                            throw new Error(t('codex.not_installed'));
                           }
                           const st = await backend.codexLoginChatgpt();
                           setStatus(st);
@@ -281,7 +283,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
                         }
                       }}
                     >
-                      Увійти (ChatGPT)
+                      {t('codex.login_chatgpt')}
                     </Button>
                     <Button
                       variant="outline"
@@ -300,13 +302,13 @@ export function CodexView({ codexReady }: CodexViewProps) {
                         }
                       }}
                     >
-                      Вийти
+                      {t('codex.logout')}
                     </Button>
                   </div>
 
                   {loginUrl && (
                     <div className="mt-3 space-y-2">
-                      <div className="text-xs text-muted-foreground">Відкрийте цей URL у браузері:</div>
+                      <div className="text-xs text-muted-foreground">URL</div>
                       <div className="flex gap-2">
                         <Input readOnly value={loginUrl} />
                         <Button
@@ -322,7 +324,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
                             }
                           }}
                         >
-                          Відкрити
+                          {t('codex.copy_link')}
                         </Button>
                       </div>
                     </div>

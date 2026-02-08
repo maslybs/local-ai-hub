@@ -3,8 +3,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { backend, type LogEntry } from '@/lib/backend';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { useI18n } from '@/i18n/I18nContext';
 
 export function LogsJobsView() {
+  const { t } = useI18n();
   const [logs, setLogs] = React.useState<LogEntry[]>([]);
 
   const refresh = React.useCallback(async () => {
@@ -25,14 +27,14 @@ export function LogsJobsView() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold">Logs & Jobs</h2>
-        <p className="text-muted-foreground">Останні події застосунку.</p>
+        <h2 className="text-2xl font-bold">{t('logs.title')}</h2>
+        <p className="text-muted-foreground">{t('logs.subtitle')}</p>
       </div>
 
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle>Logs</CardTitle>
+            <CardTitle>{t('logs.logs')}</CardTitle>
             <div className="flex items-center gap-2">
               <Badge variant="outline">{logs.length}</Badge>
               <Button
@@ -43,14 +45,14 @@ export function LogsJobsView() {
                   await refresh();
                 }}
               >
-                Очистити
+                {t('logs.clear')}
               </Button>
             </div>
           </div>
           <CardDescription />
         </CardHeader>
         <CardContent className="space-y-2">
-          {logs.length === 0 && <div className="text-sm text-muted-foreground">Поки що пусто.</div>}
+          {logs.length === 0 && <div className="text-sm text-muted-foreground">{t('logs.empty')}</div>}
           {logs.map((l, idx) => (
             <div key={idx} className="flex items-center gap-3 text-sm">
               <span className="w-20 text-muted-foreground uppercase">{l.level}</span>

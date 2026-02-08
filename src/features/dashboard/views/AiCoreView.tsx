@@ -3,23 +3,25 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
 import { CodexView } from './CodexView';
+import { useI18n } from '@/i18n/I18nContext';
 
 type AiCoreViewProps = {
   codexReady: boolean;
 };
 
 export function AiCoreView({ codexReady }: AiCoreViewProps) {
+  const { t } = useI18n();
   const [selected, setSelected] = React.useState<'codex' | 'coming_soon'>('codex');
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold">AI Core</h2>
+        <h2 className="text-2xl font-bold">{t('ai_core.title')}</h2>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
         <Card>
           <CardHeader>
-            <CardTitle>AI</CardTitle>
+            <CardTitle>{t('ai_core.list_title')}</CardTitle>
             <CardDescription />
           </CardHeader>
           <CardContent className="space-y-1">
@@ -34,9 +36,9 @@ export function AiCoreView({ codexReady }: AiCoreViewProps) {
               )}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="font-medium">Codex</div>
+                <div className="font-medium">{t('ai_core.codex')}</div>
                 <Badge variant={codexReady ? 'success' : 'warning'}>
-                  {codexReady ? 'Ready' : 'Setup'}
+                  {codexReady ? t('codex.ready') : t('codex.setup')}
                 </Badge>
               </div>
             </button>
@@ -52,8 +54,8 @@ export function AiCoreView({ codexReady }: AiCoreViewProps) {
               )}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="font-medium">Add AI</div>
-                <Badge variant="secondary">Beta</Badge>
+                <div className="font-medium">{t('ai_core.add_ai')}</div>
+                <Badge variant="secondary">{t('common.beta')}</Badge>
               </div>
             </button>
           </CardContent>
@@ -64,11 +66,11 @@ export function AiCoreView({ codexReady }: AiCoreViewProps) {
           {selected === 'coming_soon' && (
             <Card>
               <CardHeader>
-                <CardTitle>Інші AI</CardTitle>
+                <CardTitle>{t('ai_core.other_ai_title')}</CardTitle>
                 <CardDescription />
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
-                Недоступно в бета-версії.
+                {t('common.unavailable_beta')}
               </CardContent>
             </Card>
           )}

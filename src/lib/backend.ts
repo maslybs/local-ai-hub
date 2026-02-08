@@ -23,9 +23,15 @@ export type CodexConfig = {
   universal_fallback_only?: boolean;
 };
 
+export type UiConfig = {
+  // null = system default
+  language: string | null;
+};
+
 export type AppConfig = {
   telegram: TelegramConfig;
   codex: CodexConfig;
+  ui?: UiConfig;
 };
 
 export type TelegramStatus = {

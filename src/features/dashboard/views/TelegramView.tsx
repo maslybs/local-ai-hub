@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input';
 import type { AppConfig, TelegramStatus } from '@/lib/backend';
 import { Switch } from '@/components/ui/switch';
 import { backend } from '@/lib/backend';
+import { useI18n } from '@/i18n/I18nContext';
 
 type TelegramViewProps = {
   tokenStored: boolean;
@@ -39,6 +40,7 @@ export function TelegramView({
   onTelegramToken,
   tokenError,
 }: TelegramViewProps) {
+  const { t } = useI18n();
   const [tokenInput, setTokenInput] = React.useState('');
   const [chatIdInput, setChatIdInput] = React.useState('');
   const [pollTimeoutInput, setPollTimeoutInput] = React.useState<string>('');
@@ -67,24 +69,22 @@ export function TelegramView({
         <div className="flex items-center justify-between px-5 py-4 border-b border-border/50">
           <div className="flex items-center gap-2">
             <div className="text-base font-semibold">Telegram</div>
-            <Badge variant={telegramRunning ? 'success' : 'secondary'}>{telegramRunning ? 'On' : 'Off'}</Badge>
-            <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? 'Token set' : 'Token missing'}</Badge>
+            <Badge variant={telegramRunning ? 'success' : 'secondary'}>{telegramRunning ? t('common.on') : t('common.off')}</Badge>
+            <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? t('overview.token_set') : t('overview.token_missing')}</Badge>
             {botUsername && <Badge variant="outline">@{botUsername}</Badge>}
           </div>
 
           <Dialog>
             <DialogTrigger asChild>
-              <Button variant="ghost" size="icon" title="Telegram settings">
+              <Button variant="ghost" size="icon" title={t('telegram.settings')}>
                 <Settings2 className="h-5 w-5" />
               </Button>
             </DialogTrigger>
 
             <DialogContent className="max-w-xl">
               <DialogHeader>
-                <DialogTitle>Налаштування Telegram</DialogTitle>
-                <DialogDescription>
-                  Додайте токен, налаштуйте доступ і закрийте.
-                </DialogDescription>
+                <DialogTitle>{t('telegram.settings')}</DialogTitle>
+                <DialogDescription />
               </DialogHeader>
 
               <div className="space-y-3">
@@ -107,17 +107,17 @@ export function TelegramView({
                       }
                     }}
                   >
-                    Self-test
+                    {t('telegram.self_test')}
                   </Button>
                 </div>
 
                 <div className="rounded-xl bg-muted/20 p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium">Токен</div>
-                    <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? 'Є' : 'Нема'}</Badge>
+                    <div className="text-sm font-medium">{t('telegram.token')}</div>
+                    <Badge variant={tokenStored ? 'success' : 'warning'}>{tokenStored ? t('common.ok') : t('common.missing')}</Badge>
                   </div>
                   <div className="mt-3 flex items-center justify-between">
-                    <div className="text-xs text-muted-foreground">Файл (fallback)</div>
+                    <div className="text-xs text-muted-foreground">{t('telegram.token_storage_file')}</div>
                     <Switch
                       checked={storageMode === 'file'}
                       onCheckedChange={async (checked) => {
@@ -125,6 +125,7 @@ export function TelegramView({
                         const next: AppConfig = config ?? {
                           telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
                           codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+                          ui: { language: null },
                         };
                         next.telegram.token_storage = checked ? 'file' : 'keychain';
                         try {
@@ -133,12 +134,12 @@ export function TelegramView({
                           setErr(e?.message ?? String(e));
                         }
                       }}
-                      title="Менш безпечно"
+                      title={t('telegram.less_secure')}
                     />
                   </div>
                   <div className="mt-3 flex gap-2">
                     <Input
-                      placeholder="Вставте токен бота"
+                      placeholder={t('telegram.token_placeholder')}
                       value={tokenInput}
                       onChange={(e) => setTokenInput(e.target.value)}
                     />
@@ -153,7 +154,7 @@ export function TelegramView({
                         }
                       }}
                     >
-                      Зберегти
+                      {t('common.save')}
                     </Button>
                     <Button
                       variant="outline"
@@ -166,19 +167,19 @@ export function TelegramView({
                         }
                       }}
                     >
-                      Видалити
+                      {t('common.delete')}
                     </Button>
                   </div>
                 </div>
 
                 <div className="rounded-xl bg-muted/20 p-4">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium">Доступ</div>
+                    <div className="text-sm font-medium">{t('telegram.access')}</div>
                     <Badge variant="outline">{allowedIds.length}</Badge>
                   </div>
                   <div className="mt-3 flex gap-2">
                     <Input
-                      placeholder="chat_id"
+                      placeholder={t('telegram.chat_id')}
                       value={chatIdInput}
                       onChange={(e) => setChatIdInput(e.target.value)}
                     />
@@ -188,12 +189,13 @@ export function TelegramView({
                         setErr(null);
                         const id = Number(chatIdInput.trim());
                         if (!Number.isFinite(id)) {
-                          setErr('Невірний chat_id');
+                          setErr(t('telegram.invalid_chat_id'));
                           return;
                         }
                         const next: AppConfig = config ?? {
                           telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
                           codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+                          ui: { language: null },
                         };
                         const set = new Set(next.telegram.allowed_chat_ids ?? []);
                         set.add(id);
@@ -206,7 +208,7 @@ export function TelegramView({
                         }
                       }}
                     >
-                      Додати
+                      {t('common.add')}
                     </Button>
                   </div>
                   {allowedIds.length > 0 && (
@@ -222,6 +224,7 @@ export function TelegramView({
                             const next: AppConfig = config ?? {
                               telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
                               codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+                              ui: { language: null },
                             };
                         next.telegram.allowed_chat_ids = (next.telegram.allowed_chat_ids ?? []).filter((x) => x !== id);
                         try {
@@ -239,7 +242,7 @@ export function TelegramView({
                 </div>
 
                 <div className="rounded-xl bg-muted/20 p-4">
-                  <div className="text-sm font-medium">Timeout</div>
+                  <div className="text-sm font-medium">{t('telegram.timeout')}</div>
                   <div className="mt-3 flex gap-2">
                     <Input
                       placeholder="20"
@@ -252,12 +255,13 @@ export function TelegramView({
                         setErr(null);
                         const v = Number(pollTimeoutInput.trim());
                         if (!Number.isFinite(v) || v <= 0) {
-                          setErr('Невірний timeout');
+                          setErr(t('telegram.invalid_timeout'));
                           return;
                         }
                         const next: AppConfig = config ?? {
                           telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
                           codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+                          ui: { language: null },
                         };
                         next.telegram.poll_timeout_sec = Math.floor(v);
                         try {
@@ -267,7 +271,7 @@ export function TelegramView({
                         }
                       }}
                     >
-                      Зберегти
+                      {t('common.save')}
                     </Button>
                   </div>
                 </div>
@@ -279,14 +283,11 @@ export function TelegramView({
         <div className="px-5 py-4 flex items-center justify-between gap-3">
           <div className="text-sm text-muted-foreground flex items-center gap-3">
             <span>
-              Allowed: <span className="text-foreground font-medium">{allowedChatsCount}</span>
+              {t('telegram.allowlist', { count: allowedChatsCount })}
             </span>
             {typeof lastPoll === 'number' && (
               <span>
-                Last poll:{' '}
-                <span className="text-foreground font-medium">
-                  {new Date(Number(lastPoll)).toLocaleTimeString()}
-                </span>
+                {t('telegram.last_poll', { time: new Date(Number(lastPoll)).toLocaleTimeString() })}
               </span>
             )}
           </div>
@@ -302,7 +303,7 @@ export function TelegramView({
                 }
               }}
             >
-              Запустити
+              {t('telegram.start')}
             </Button>
             <Button
               variant="outline"
@@ -315,7 +316,7 @@ export function TelegramView({
                 }
               }}
             >
-              Зупинити
+              {t('telegram.stop')}
             </Button>
           </div>
         </div>

@@ -71,12 +71,28 @@ fn default_universal_fallback_only() -> bool {
   true
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+  // User-selected language code (e.g. "en", "uk").
+  // If not set, the frontend should use the system language.
+  #[serde(default)]
+  pub language: Option<String>,
+}
+
+impl Default for UiConfig {
+  fn default() -> Self {
+    Self { language: None }
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
   #[serde(default)]
   pub telegram: TelegramConfig,
   #[serde(default)]
   pub codex: CodexConfig,
+  #[serde(default)]
+  pub ui: UiConfig,
 }
 
 pub fn load_config(path: &PathBuf) -> Result<AppConfig, String> {

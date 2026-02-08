@@ -4,6 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { cn } from '@/lib/utils';
 import { TelegramView } from './TelegramView';
 import type { AppConfig, TelegramStatus } from '@/lib/backend';
+import { useI18n } from '@/i18n/I18nContext';
 
 type ConnectorsViewProps = {
   tokenStored: boolean;
@@ -28,17 +29,18 @@ export function ConnectorsView({
   onTelegramToken,
   tokenError,
 }: ConnectorsViewProps) {
+  const { t } = useI18n();
   const [selected, setSelected] = React.useState<'telegram' | 'coming_soon'>('telegram');
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold">Connectors</h2>
+        <h2 className="text-2xl font-bold">{t('connectors.title')}</h2>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start">
         <Card>
           <CardHeader>
-            <CardTitle>Конектори</CardTitle>
+            <CardTitle>{t('connectors.list_title')}</CardTitle>
             <CardDescription />
           </CardHeader>
           <CardContent className="space-y-1">
@@ -53,9 +55,9 @@ export function ConnectorsView({
               )}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="font-medium">Telegram</div>
+                <div className="font-medium">{t('connectors.telegram')}</div>
                 <Badge variant={telegramRunning ? 'success' : 'secondary'}>
-                  {telegramRunning ? 'On' : 'Off'}
+                  {telegramRunning ? t('common.on') : t('common.off')}
                 </Badge>
               </div>
             </button>
@@ -71,8 +73,8 @@ export function ConnectorsView({
               )}
             >
               <div className="flex items-center justify-between gap-3">
-                <div className="font-medium">Add connector</div>
-                <Badge variant="secondary">Beta</Badge>
+                <div className="font-medium">{t('connectors.add_connector')}</div>
+                <Badge variant="secondary">{t('common.beta')}</Badge>
               </div>
             </button>
           </CardContent>
@@ -96,11 +98,11 @@ export function ConnectorsView({
           {selected === 'coming_soon' && (
             <Card>
               <CardHeader>
-                <CardTitle>Інші конектори</CardTitle>
+                <CardTitle>{t('connectors.other_connectors_title')}</CardTitle>
                 <CardDescription />
               </CardHeader>
               <CardContent className="text-sm text-muted-foreground">
-                Недоступно в бета-версії.
+                {t('common.unavailable_beta')}
               </CardContent>
             </Card>
           )}

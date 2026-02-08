@@ -52,6 +52,3 @@ tmp/
 temp/
 .claude/
 src-tauri/target/
-
-# Local release artifacts (copied for convenience)
-release/

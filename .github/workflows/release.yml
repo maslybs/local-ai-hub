@@ -24,11 +24,11 @@ jobs:
           - name: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - name: macos-x64
             os: macos-13
             target: x86_64-apple-darwin
-            bundles: dmg
+            bundles: app,dmg
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -102,6 +102,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
+
+          # Zip the .app so it can be attached to GitHub Releases.
+          APP_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          APP_PATH="$(find "$APP_DIR" -maxdepth 1 -type d -name "*.app" -print -quit)"
+          if [[ -z "${APP_PATH:-}" ]]; then
+            echo "No .app found under: $APP_DIR"
+            exit 1
+          fi
+          APP_ZIP="artifacts/$(basename "$APP_PATH")_${{ matrix.target }}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$APP_ZIP"
+
           find "src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -maxdepth 1 -type f -name "*.dmg" -print -exec cp "{}" artifacts/ \;
           ls -la artifacts || true
 
@@ -154,3 +165,13 @@ jobs:
         with:
           files: artifacts/*
 
+      # Convenience release for manual runs: updates/creates a "nightly" release with latest artifacts.
+      - name: Publish GitHub Release (manual nightly)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: Nightly
+          prerelease: true
+          make_latest: false
+          files: artifacts/*

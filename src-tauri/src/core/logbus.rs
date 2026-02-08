@@ -1,8 +1,9 @@
 use std::{
   collections::VecDeque,
   sync::{Arc, Mutex},
-  time::{SystemTime, UNIX_EPOCH},
 };
+
+use super::time::now_unix_ms;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,13 +19,6 @@ pub struct LogEntry {
   pub level: LogLevel,
   pub source: String,
   pub msg: String,
-}
-
-fn now_unix_ms() -> u128 {
-  SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_millis()
 }
 
 #[derive(Clone)]
@@ -71,4 +65,3 @@ impl LogBus {
     g.buf.clear();
   }
 }
-

@@ -8,14 +8,7 @@ pub struct TelegramStatus {
   pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BotState {
   pub offset: i64,
 }
-
-impl Default for BotState {
-  fn default() -> Self {
-    Self { offset: 0 }
-  }
-}
-

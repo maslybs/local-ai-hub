@@ -213,13 +213,6 @@ impl CodexRuntime {
     Ok(())
   }
 
-  pub async fn ensure_started(&self) -> Result<(), String> {
-    // Codex app-server is stdio-based; if we accidentally spawn it multiple times concurrently,
-    // we can end up dropping stdin for one process and it will exit immediately. Serialize lifecycle.
-    let _guard = self.inner.lifecycle_lock.lock().await;
-    self.ensure_started_locked().await
-  }
-
   async fn ensure_started_locked(&self) -> Result<(), String> {
     if self.inner.status.read().await.running {
       return Ok(());
@@ -827,7 +820,7 @@ impl CodexRuntime {
     }
   }
 
-  async fn import_user_codex_auth(&self, codex_home: &PathBuf) {
+  async fn import_user_codex_auth(&self, codex_home: &std::path::Path) {
     // Import auth/config from ~/.codex into our app profile if missing.
     // This keeps state isolated while preserving "already signed in" behavior.
     let Some(home_dir) = std::env::var_os("HOME") else { return; };
@@ -857,49 +850,18 @@ impl CodexRuntime {
     // Optional: reuse the user's Codex config defaults (model, features, etc.) if we have none yet.
     let cfg_src = user_home.join("config.toml");
     let cfg_dst = codex_home.join("config.toml");
-    if !cfg_dst.exists() && cfg_src.exists() {
-      if fs::copy(&cfg_src, &cfg_dst).is_ok() {
-        #[cfg(unix)]
-        {
-          use std::os::unix::fs::PermissionsExt;
-          let _ = fs::set_permissions(&cfg_dst, fs::Permissions::from_mode(0o600));
-        }
-        self.inner.logs.push(logbus::LogLevel::Info, "codex", "imported config.toml from ~/.codex");
+    if !cfg_dst.exists() && cfg_src.exists() && fs::copy(&cfg_src, &cfg_dst).is_ok() {
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&cfg_dst, fs::Permissions::from_mode(0o600));
       }
+      self.inner.logs.push(logbus::LogLevel::Info, "codex", "imported config.toml from ~/.codex");
     }
   }
 }
 
 impl CodexRuntime {
-  async fn reset_thread_for_chat(&self, chat_id: i64) {
-    // Clear the stored thread mapping for this Telegram chat.
-    // We intentionally key by chat_id to avoid depending on exact error formatting.
-    let removed: Option<String> = {
-      let mut threads = self.inner.chat_threads.lock().await;
-      let removed = threads.remove(&chat_id);
-      if removed.is_some() {
-        if let Err(e) = persist_chat_threads(self.inner.chat_threads_path.as_ref(), &threads) {
-          self
-            .inner
-            .logs
-            .push(logbus::LogLevel::Warn, "codex", format!("failed to persist thread reset: {e}"));
-        }
-      }
-      removed
-    };
-
-    if let Some(old_thread_id) = removed {
-      {
-        let mut resumed = self.inner.resumed_threads.lock().await;
-        resumed.remove(&old_thread_id);
-      }
-      self
-        .inner
-        .logs
-        .push(logbus::LogLevel::Warn, "codex", format!("reset thread mapping for chat_id={chat_id}"));
-    }
-  }
-
   async fn reset_thread_everywhere(&self, thread_id: &str) {
     let thread_id = thread_id.to_string();
 
@@ -1206,12 +1168,10 @@ fn byte_index_at_char(s: &str, max_chars: usize) -> usize {
   if max_chars == 0 {
     return 0;
   }
-  let mut count = 0usize;
-  for (i, _) in s.char_indices() {
+  for (count, (i, _)) in s.char_indices().enumerate() {
     if count == max_chars {
       return i;
     }
-    count += 1;
   }
   s.len()
 }
@@ -1384,10 +1344,8 @@ fn find_stream_cut(
       }
     }
     if let Some(i) = last_ws {
-      if i > 0 {
-        if is_safe_chunk_boundary(rem, i, force) {
-          return Some(i);
-        }
+      if i > 0 && is_safe_chunk_boundary(rem, i, force) {
+        return Some(i);
       }
     }
   }

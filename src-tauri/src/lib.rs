@@ -124,13 +124,13 @@ pub fn run() {
       )?;
       app.handle().plugin(tauri_plugin_dialog::init())?;
 
-      let cfg = load_or_default_config(&app.handle());
+      let cfg = load_or_default_config(app.handle());
       let cfg0 = cfg.clone();
       let cfg = Arc::new(RwLock::new(cfg));
       let logs = logbus::LogBus::new(1200);
       logs.push(logbus::LogLevel::Info, "app", "startup");
 
-      let codex = CodexRuntime::new(&app.handle(), logs.clone());
+      let codex = CodexRuntime::new(app.handle(), logs.clone());
       tauri::async_runtime::block_on(codex.set_workspace_dir(cfg0.codex.workspace_dir.clone()));
       tauri::async_runtime::block_on(codex.set_universal_instructions(
         cfg0.codex.universal_instructions.clone(),

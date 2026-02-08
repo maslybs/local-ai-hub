@@ -11,7 +11,9 @@ pub struct CodexStatus {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct CodexDoctor {
   pub node_ok: bool,
+  pub node_path: Option<String>,
   pub npm_ok: bool,
+  pub npm_path: Option<String>,
   pub codex_ok: bool,
   pub codex_version: Option<String>,
   pub local_codex_ok: bool,

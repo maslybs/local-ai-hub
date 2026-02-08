@@ -163,7 +163,11 @@ export function CodexView({ codexReady }: CodexViewProps) {
                     </div>
                     {doctor && (
                       <div className="mt-3 text-xs text-muted-foreground">
-                        Node: {doctor.node_ok ? 'ok' : 'missing'} | npm: {doctor.npm_ok ? 'ok' : 'missing'}
+                        Node: {doctor.node_ok ? 'ok' : 'missing'}
+                        {doctor.node_path ? ` (${doctor.node_path})` : ''}
+                        {' | '}
+                        npm: {doctor.npm_ok ? 'ok' : 'missing'}
+                        {doctor.npm_path ? ` (${doctor.npm_path})` : ''}
                       </div>
                     )}
                   </div>

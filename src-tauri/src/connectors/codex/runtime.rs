@@ -178,22 +178,29 @@ impl CodexRuntime {
 
   pub async fn doctor(&self) -> CodexDoctor {
     let local_entry = self.local_codex_entry_path();
-    let local_codex_ok = local_entry.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let local_codex_ok = local_entry.as_ref().map(|p| p.is_file()).unwrap_or(false);
     let local_codex_version = self.local_codex_version();
 
-    let (node_ok, npm_ok) = tokio::join!(
-      check_cmd_version(node_cmd(), &["--version"]),
-      check_cmd_version(npm_cmd(), &["--version"])
-    );
-    let node_ok = node_ok.is_some();
-    let npm_ok = npm_ok.is_some();
+    let node_path = resolve_cmd_path("node").await;
+    let npm_path = resolve_cmd_path(npm_cmd()).await;
+
+    let node_ok = match node_path.as_deref() {
+      Some(p) => check_cmd_version(p, &["--version"]).await.is_some(),
+      None => false,
+    };
+    let npm_ok = match npm_path.as_deref() {
+      Some(p) => check_cmd_version(p, &["--version"]).await.is_some(),
+      None => false,
+    };
 
     let codex_version = check_cmd_version(codex_cmd(), &["--version"]).await;
     let codex_ok = codex_version.is_some();
 
     CodexDoctor {
       node_ok,
+      node_path,
       npm_ok,
+      npm_path,
       codex_ok,
       codex_version,
       local_codex_ok,
@@ -214,11 +221,16 @@ impl CodexRuntime {
       return Err(format!("create codex tools dir failed: {e}"));
     }
 
-    // Ensure prerequisites are present.
-    if check_cmd_version(node_cmd(), &["--version"]).await.is_none() {
+    let node = resolve_cmd_path("node").await.ok_or_else(|| {
+      "Node.js is required to install/run Codex. Install Node.js first, then try again.".to_string()
+    })?;
+    let npm = resolve_cmd_path(npm_cmd()).await.ok_or_else(|| {
+      "npm is required to install Codex. Install Node.js (includes npm) first, then try again.".to_string()
+    })?;
+    if check_cmd_version(&node, &["--version"]).await.is_none() {
       return Err("Node.js is required to install/run Codex. Install Node.js first, then try again.".to_string());
     }
-    if check_cmd_version(npm_cmd(), &["--version"]).await.is_none() {
+    if check_cmd_version(&npm, &["--version"]).await.is_none() {
       return Err("npm is required to install Codex. Install Node.js (includes npm) first, then try again.".to_string());
     }
 
@@ -228,7 +240,7 @@ impl CodexRuntime {
       .push(logbus::LogLevel::Info, "codex", "installing Codex (npm)...");
 
     // Install into app_data_dir/codex-tools so it doesn't require admin/sudo.
-    let mut cmd = Command::new(npm_cmd());
+    let mut cmd = Command::new(&npm);
     cmd
       .arg("install")
       .arg("--prefix")
@@ -253,7 +265,7 @@ impl CodexRuntime {
     }
 
     // Validate entry exists.
-    let entry_ok = self.local_codex_entry_path().as_ref().map(|p| p.exists()).unwrap_or(false);
+    let entry_ok = self.local_codex_entry_path().as_ref().map(|p| p.is_file()).unwrap_or(false);
     if !entry_ok {
       return Err("Codex was installed but entry point was not found. Try again or reinstall.".to_string());
     }
@@ -763,8 +775,11 @@ impl CodexRuntime {
       .and_then(|p| p.to_str().map(|s| s.to_string()));
 
     // Preferred: run the app-local Codex install (no global dependency).
-    if let Some(entry) = self.local_codex_entry_path().filter(|p| p.exists()) {
-      let mut cmd = Command::new(node_cmd());
+    if let Some(entry) = self.local_codex_entry_path().filter(|p| p.is_file()) {
+      let node = resolve_cmd_path("node").await.ok_or_else(|| {
+        "Node.js is required to run Codex. Install Node.js first, then try again.".to_string()
+      })?;
+      let mut cmd = Command::new(&node);
       cmd
         .arg(entry)
         .arg("app-server")
@@ -777,7 +792,7 @@ impl CodexRuntime {
       return match cmd.spawn() {
         Ok(c) => Ok(c),
         Err(e) => self
-          .fail_start(format!("Failed to start codex app-server (local install): {e}"))
+          .fail_start(format!("Failed to start codex app-server (local install): {e}. node={node}"))
           .await,
       };
     }
@@ -968,10 +983,6 @@ fn npm_cmd() -> &'static str {
   "npm"
 }
 
-fn node_cmd() -> &'static str {
-  "node"
-}
-
 async fn check_cmd_version(cmd: &str, args: &[&str]) -> Option<String> {
   let mut c = Command::new(cmd);
   c.args(args);
@@ -987,6 +998,105 @@ async fn check_cmd_version(cmd: &str, args: &[&str]) -> Option<String> {
     return None;
   }
   Some(s)
+}
+
+async fn resolve_cmd_path(exe: &str) -> Option<String> {
+  // If `exe` is already an absolute path and exists, use it.
+  let p = PathBuf::from(exe);
+  if p.is_absolute() && p.exists() {
+    return p.to_str().map(|s| s.to_string());
+  }
+
+  // Common locations (helps GUI apps that don't inherit PATH).
+  #[cfg(target_os = "macos")]
+  {
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+      let cand = PathBuf::from(dir).join(exe);
+      if cand.exists() {
+        if let Some(s) = cand.to_str() {
+          return Some(s.to_string());
+        }
+      }
+    }
+  }
+
+  // GUI apps on macOS often have a minimal PATH; try resolving using a login shell
+  // so Homebrew/NVM paths are discovered.
+  #[cfg(unix)]
+  {
+    if let Some(p) = resolve_cmd_path_unix_login_shell(exe).await {
+      return Some(p);
+    }
+  }
+
+  #[cfg(windows)]
+  {
+    if let Some(p) = resolve_cmd_path_windows_where(exe).await {
+      return Some(p);
+    }
+  }
+
+  // Fallback: rely on current PATH.
+  if check_cmd_version(exe, &["--version"]).await.is_some() {
+    return Some(exe.to_string());
+  }
+  None
+}
+
+#[cfg(unix)]
+async fn resolve_cmd_path_unix_login_shell(exe: &str) -> Option<String> {
+  // Prefer zsh on macOS, fallback to bash.
+  let shell = if PathBuf::from("/bin/zsh").exists() {
+    "/bin/zsh"
+  } else if PathBuf::from("/bin/bash").exists() {
+    "/bin/bash"
+  } else {
+    return None;
+  };
+
+  // `command -v` is POSIX and doesn't depend on `which`.
+  let script = format!("command -v {exe} 2>/dev/null | head -n 1");
+  let mut cmd = Command::new(shell);
+  cmd.arg("-lc").arg(script);
+  let out = match tokio::time::timeout(Duration::from_secs(6), cmd.output()).await {
+    Ok(Ok(o)) => o,
+    _ => return None,
+  };
+  if !out.status.success() {
+    return None;
+  }
+  let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+  if s.is_empty() {
+    return None;
+  }
+  let p = PathBuf::from(&s);
+  if p.exists() {
+    return Some(s);
+  }
+  None
+}
+
+#[cfg(windows)]
+async fn resolve_cmd_path_windows_where(exe: &str) -> Option<String> {
+  let mut cmd = Command::new("cmd");
+  cmd.args(["/C", "where", exe]);
+  let out = match tokio::time::timeout(Duration::from_secs(6), cmd.output()).await {
+    Ok(Ok(o)) => o,
+    _ => return None,
+  };
+  if !out.status.success() {
+    return None;
+  }
+  let s = String::from_utf8_lossy(&out.stdout);
+  let first = s.lines().next().map(|l| l.trim().to_string()).unwrap_or_default();
+  if first.is_empty() {
+    return None;
+  }
+  let p = PathBuf::from(&first);
+  if p.exists() {
+    return Some(first);
+  }
+  None
 }
 
 #[cfg(windows)]

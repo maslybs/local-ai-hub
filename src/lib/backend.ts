@@ -68,7 +68,9 @@ export type CodexStatus = {
 
 export type CodexDoctor = {
   node_ok: boolean;
+  node_path: string | null;
   npm_ok: boolean;
+  npm_path: string | null;
   codex_ok: boolean;
   codex_version: string | null;
   local_codex_ok: boolean;

@@ -55,6 +55,3 @@ src-tauri/target/
 
 # Docs (not shipped)
 docs/
-
-# Local release artifacts (copied for convenience)
-release/

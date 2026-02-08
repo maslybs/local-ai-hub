@@ -21,17 +21,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon
           - name: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
             bundles: dmg
-          # Intel macOS
           - name: macos-x64
             os: macos-13
             target: x86_64-apple-darwin
             bundles: dmg
-          # Windows
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -93,7 +90,6 @@ jobs:
       - name: Tauri build (bundles)
         env:
           RUST_BACKTRACE: 1
-          # macOS signing + notarization (macOS only)
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -157,3 +153,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+

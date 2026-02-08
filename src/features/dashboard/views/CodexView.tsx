@@ -22,6 +22,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
   const [status, setStatus] = React.useState<Awaited<ReturnType<typeof backend.codexStatus>> | null>(null);
+  const [doctor, setDoctor] = React.useState<Awaited<ReturnType<typeof backend.codexDoctor>> | null>(null);
   const [workspaceDir, setWorkspaceDir] = React.useState<string>('');
   const [universalInstructions, setUniversalInstructions] = React.useState<string>('');
   const [fallbackOnly, setFallbackOnly] = React.useState<boolean>(true);
@@ -30,7 +31,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
     let alive = true;
     (async () => {
       try {
-        const [st, cfg] = await Promise.allSettled([backend.codexStatus(), backend.getConfig()]);
+        const [st, cfg, doc] = await Promise.allSettled([backend.codexStatus(), backend.getConfig(), backend.codexDoctor()]);
         if (!alive) return;
         if (st.status === 'fulfilled') setStatus(st.value);
         if (cfg.status === 'fulfilled') {
@@ -38,6 +39,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
           setUniversalInstructions(cfg.value?.codex?.universal_instructions ?? '');
           setFallbackOnly(cfg.value?.codex?.universal_fallback_only ?? true);
         }
+        if (doc.status === 'fulfilled') setDoctor(doc.value);
       } catch {
         // ignore
       }
@@ -51,6 +53,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
   const loginUrl = status?.login_url ?? null;
   const lastError = status?.last_error ?? null;
   const ready = Boolean(status?.initialized);
+  const codexInstalled = Boolean(doctor?.local_codex_ok);
   return (
     <div className="rounded-2xl border border-border/60 bg-card/70 backdrop-blur-xl shadow-sm overflow-hidden">
       <div className="flex items-center justify-between px-5 py-4 border-b border-border/50">
@@ -68,6 +71,9 @@ export function CodexView({ codexReady }: CodexViewProps) {
               setBusy(true);
               setErr(null);
               try {
+                if (!codexInstalled) {
+                  throw new Error('Codex не встановлено. Відкрий налаштування і натисни "Встановити".');
+                }
                 // If already ready, do a real reconnect (stop + connect).
                 // "Connect" alone is idempotent and won't recover a wedged process.
                 const st = ready
@@ -100,6 +106,68 @@ export function CodexView({ codexReady }: CodexViewProps) {
 
               <div className="space-y-3">
                 {err && <div className="text-sm text-destructive">{err}</div>}
+
+                {!codexInstalled && (
+                  <div className="rounded-xl bg-muted/20 p-4">
+                    <div className="text-sm font-medium">Codex не встановлено</div>
+                    <div className="mt-3 flex gap-2">
+                      <Button
+                        variant="default"
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          setErr(null);
+                          try {
+                            const mod = await import('@tauri-apps/plugin-dialog');
+                            const ok = await (mod.ask?.(
+                              'Встановити Codex у цю систему? Потрібен Node.js (npm).',
+                              { title: 'Install Codex', kind: 'warning' },
+                            ) ?? Promise.resolve(window.confirm('Встановити Codex? Потрібен Node.js (npm).')));
+                            if (!ok) return;
+
+                            const doc = await backend.codexInstall();
+                            setDoctor(doc);
+                            try {
+                              const st = await backend.codexConnect();
+                              setStatus(st);
+                            } catch {
+                              // ignore
+                            }
+                          } catch (e: any) {
+                            setErr(e?.message ?? String(e));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        Встановити
+                      </Button>
+                      <Button
+                        variant="outline"
+                        disabled={busy}
+                        onClick={async () => {
+                          setBusy(true);
+                          setErr(null);
+                          try {
+                            const doc = await backend.codexDoctor();
+                            setDoctor(doc);
+                          } catch (e: any) {
+                            setErr(e?.message ?? String(e));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        Перевірити
+                      </Button>
+                    </div>
+                    {doctor && (
+                      <div className="mt-3 text-xs text-muted-foreground">
+                        Node: {doctor.node_ok ? 'ok' : 'missing'} | npm: {doctor.npm_ok ? 'ok' : 'missing'}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 <div className="rounded-xl bg-muted/20 p-4">
                   <div className="text-sm font-medium">Робоча папка</div>
@@ -189,8 +257,19 @@ export function CodexView({ codexReady }: CodexViewProps) {
                         setBusy(true);
                         setErr(null);
                         try {
+                          if (!codexInstalled) {
+                            throw new Error('Спочатку встанови Codex.');
+                          }
                           const st = await backend.codexLoginChatgpt();
                           setStatus(st);
+                          if (st.login_url) {
+                            try {
+                              const shell = await import('@tauri-apps/plugin-shell');
+                              await shell.open(st.login_url);
+                            } catch {
+                              // ignore (user can still copy the URL)
+                            }
+                          }
                         } catch (e: any) {
                           setErr(e?.message ?? String(e));
                         } finally {
@@ -224,7 +303,24 @@ export function CodexView({ codexReady }: CodexViewProps) {
                   {loginUrl && (
                     <div className="mt-3 space-y-2">
                       <div className="text-xs text-muted-foreground">Відкрийте цей URL у браузері:</div>
-                      <Input readOnly value={loginUrl} />
+                      <div className="flex gap-2">
+                        <Input readOnly value={loginUrl} />
+                        <Button
+                          variant="outline"
+                          disabled={busy}
+                          onClick={async () => {
+                            setErr(null);
+                            try {
+                              const shell = await import('@tauri-apps/plugin-shell');
+                              await shell.open(loginUrl);
+                            } catch (e: any) {
+                              setErr(e?.message ?? String(e));
+                            }
+                          }}
+                        >
+                          Відкрити
+                        </Button>
+                      </div>
                     </div>
                   )}
                 </div>

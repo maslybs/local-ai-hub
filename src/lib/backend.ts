@@ -66,6 +66,16 @@ export type CodexStatus = {
   login_id: string | null;
 };
 
+export type CodexDoctor = {
+  node_ok: boolean;
+  npm_ok: boolean;
+  codex_ok: boolean;
+  codex_version: string | null;
+  local_codex_ok: boolean;
+  local_codex_version: string | null;
+  local_codex_entry: string | null;
+};
+
 export const backend = {
   async ping(): Promise<string> {
     const invoke = await getInvoke();
@@ -140,6 +150,16 @@ export const backend = {
   async codexConnect(): Promise<CodexStatus> {
     const invoke = await getInvoke();
     return invoke<CodexStatus>('codex_connect');
+  },
+
+  async codexDoctor(): Promise<CodexDoctor> {
+    const invoke = await getInvoke();
+    return invoke<CodexDoctor>('codex_doctor');
+  },
+
+  async codexInstall(): Promise<CodexDoctor> {
+    const invoke = await getInvoke();
+    return invoke<CodexDoctor>('codex_install');
   },
 
   async codexStop(): Promise<void> {

@@ -7,3 +7,14 @@ pub struct CodexStatus {
   pub login_url: Option<String>,
   pub login_id: Option<String>,
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct CodexDoctor {
+  pub node_ok: bool,
+  pub npm_ok: bool,
+  pub codex_ok: bool,
+  pub codex_version: Option<String>,
+  pub local_codex_ok: bool,
+  pub local_codex_version: Option<String>,
+  pub local_codex_entry: Option<String>,
+}

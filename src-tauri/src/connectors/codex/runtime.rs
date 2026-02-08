@@ -1,7 +1,6 @@
 use std::{
   collections::{HashMap, HashSet},
   fs,
-  io,
   process::Stdio,
   path::PathBuf,
   sync::{
@@ -19,7 +18,7 @@ use tokio::{
   sync::{mpsc, oneshot, Mutex, RwLock},
 };
 
-use super::types::CodexStatus;
+use super::types::{CodexDoctor, CodexStatus};
 use crate::core::{logbus, paths};
 use std::collections::VecDeque;
 
@@ -39,6 +38,7 @@ struct Inner {
   stdin: Mutex<Option<BufWriter<ChildStdin>>>,
   lifecycle_lock: Mutex<()>,
   stderr_tail: Mutex<VecDeque<String>>,
+  install_lock: Mutex<()>,
   next_id: AtomicU64,
   pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
   pending_turns: Mutex<HashMap<String, PendingTurn>>,
@@ -47,6 +47,7 @@ struct Inner {
   busy_chats: Mutex<HashSet<i64>>,
   chat_threads_path: Option<PathBuf>,
   codex_home_dir: Option<PathBuf>,
+  codex_tools_dir: Option<PathBuf>,
   app_global_agents_override: Option<PathBuf>,
   logs: logbus::LogBus,
   default_cwd: RwLock<Option<String>>,
@@ -66,6 +67,7 @@ impl CodexRuntime {
   pub fn new(app: &AppHandle, logs: logbus::LogBus) -> Self {
     let (chat_threads_path, chat_threads) = load_chat_threads(app);
     let codex_home_dir = paths::codex_home_dir(app).ok();
+    let codex_tools_dir = paths::codex_tools_dir(app).ok();
     let app_global_agents_override = paths::codex_global_agents_override_path(app).ok();
     let default_cwd = std::env::current_dir()
       .ok()
@@ -77,6 +79,7 @@ impl CodexRuntime {
         stdin: Mutex::new(None),
         lifecycle_lock: Mutex::new(()),
         stderr_tail: Mutex::new(VecDeque::with_capacity(40)),
+        install_lock: Mutex::new(()),
         next_id: AtomicU64::new(1),
         pending: Mutex::new(HashMap::new()),
         pending_turns: Mutex::new(HashMap::new()),
@@ -85,6 +88,7 @@ impl CodexRuntime {
         busy_chats: Mutex::new(HashSet::new()),
         chat_threads_path,
         codex_home_dir,
+        codex_tools_dir,
         app_global_agents_override,
         logs,
         default_cwd: RwLock::new(default_cwd),
@@ -170,6 +174,95 @@ impl CodexRuntime {
 
   pub async fn connect(&self) -> Result<(), String> {
     self.ensure_initialized().await
+  }
+
+  pub async fn doctor(&self) -> CodexDoctor {
+    let local_entry = self.local_codex_entry_path();
+    let local_codex_ok = local_entry.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let local_codex_version = self.local_codex_version();
+
+    let (node_ok, npm_ok) = tokio::join!(
+      check_cmd_version(node_cmd(), &["--version"]),
+      check_cmd_version(npm_cmd(), &["--version"])
+    );
+    let node_ok = node_ok.is_some();
+    let npm_ok = npm_ok.is_some();
+
+    let codex_version = check_cmd_version(codex_cmd(), &["--version"]).await;
+    let codex_ok = codex_version.is_some();
+
+    CodexDoctor {
+      node_ok,
+      npm_ok,
+      codex_ok,
+      codex_version,
+      local_codex_ok,
+      local_codex_version,
+      local_codex_entry: local_entry.and_then(|p| p.to_str().map(|s| s.to_string())),
+    }
+  }
+
+  pub async fn install_local_codex(&self) -> Result<CodexDoctor, String> {
+    let _guard = self.inner.install_lock.lock().await;
+
+    let tools = self
+      .inner
+      .codex_tools_dir
+      .clone()
+      .ok_or_else(|| "codex tools dir unavailable".to_string())?;
+    if let Err(e) = fs::create_dir_all(&tools) {
+      return Err(format!("create codex tools dir failed: {e}"));
+    }
+
+    // Ensure prerequisites are present.
+    if check_cmd_version(node_cmd(), &["--version"]).await.is_none() {
+      return Err("Node.js is required to install/run Codex. Install Node.js first, then try again.".to_string());
+    }
+    if check_cmd_version(npm_cmd(), &["--version"]).await.is_none() {
+      return Err("npm is required to install Codex. Install Node.js (includes npm) first, then try again.".to_string());
+    }
+
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Info, "codex", "installing Codex (npm)...");
+
+    // Install into app_data_dir/codex-tools so it doesn't require admin/sudo.
+    let mut cmd = Command::new(npm_cmd());
+    cmd
+      .arg("install")
+      .arg("--prefix")
+      .arg(&tools)
+      .arg("@openai/codex");
+
+    let out = tokio::time::timeout(Duration::from_secs(12 * 60), cmd.output())
+      .await
+      .map_err(|_| "Codex install timed out".to_string())?
+      .map_err(|e| format!("Failed to run npm: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if !stdout.is_empty() {
+      self.inner.logs.push(logbus::LogLevel::Info, "codex", format!("npm: {stdout}"));
+    }
+    if !stderr.is_empty() {
+      self.inner.logs.push(logbus::LogLevel::Warn, "codex", format!("npm: {stderr}"));
+    }
+    if !out.status.success() {
+      return Err(format!("Codex install failed (npm exit {}).", out.status.code().unwrap_or(-1)));
+    }
+
+    // Validate entry exists.
+    let entry_ok = self.local_codex_entry_path().as_ref().map(|p| p.exists()).unwrap_or(false);
+    if !entry_ok {
+      return Err("Codex was installed but entry point was not found. Try again or reinstall.".to_string());
+    }
+
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Info, "codex", "Codex installed");
+    Ok(self.doctor().await)
   }
 
   pub async fn login_chatgpt(&self) -> Result<(String, String), String> {
@@ -669,10 +762,11 @@ impl CodexRuntime {
       .clone()
       .and_then(|p| p.to_str().map(|s| s.to_string()));
 
-    // Try direct spawn first (works in terminal-launched dev sessions).
-    {
-      let mut cmd = Command::new("codex");
+    // Preferred: run the app-local Codex install (no global dependency).
+    if let Some(entry) = self.local_codex_entry_path().filter(|p| p.exists()) {
+      let mut cmd = Command::new(node_cmd());
       cmd
+        .arg(entry)
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -680,40 +774,18 @@ impl CodexRuntime {
       if let Some(home) = env_home.clone() {
         cmd.env("CODEX_HOME", home);
       }
-      match cmd.spawn() {
-        Ok(c) => return Ok(c),
-        Err(e) => {
-          if e.kind() != io::ErrorKind::NotFound {
-            return self.fail_start(format!("Failed to start codex app-server: {e}")).await;
-          }
-          // Fall through: GUI apps on macOS often don't inherit shell PATH (nvm).
-          self
-            .inner
-            .logs
-            .push(logbus::LogLevel::Warn, "codex", "codex not found in PATH; trying login shell");
-        }
-      }
-    }
-
-    // Fallback: run through a login shell so PATH (nvm, brew, etc.) is available.
-    {
-      let mut cmd = Command::new("/bin/zsh");
-      cmd
-        .arg("-lc")
-        .arg("codex app-server")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-      if let Some(home) = env_home.clone() {
-        cmd.env("CODEX_HOME", home);
-      }
-      match cmd.spawn() {
+      return match cmd.spawn() {
         Ok(c) => Ok(c),
         Err(e) => self
-          .fail_start(format!("Failed to start codex app-server (via /bin/zsh -lc): {e}"))
+          .fail_start(format!("Failed to start codex app-server (local install): {e}"))
           .await,
-      }
+      };
     }
+
+    // No fallback: we want a deterministic, app-managed install for reliability (and Windows parity).
+    self
+      .fail_start("Codex is not installed. Install it in Codex settings.".to_string())
+      .await
   }
 
   async fn fail_start<T>(&self, msg: String) -> Result<T, String> {
@@ -859,6 +931,71 @@ impl CodexRuntime {
       self.inner.logs.push(logbus::LogLevel::Info, "codex", "imported config.toml from ~/.codex");
     }
   }
+}
+
+impl CodexRuntime {
+  fn local_codex_entry_path(&self) -> Option<PathBuf> {
+    let tools = self.inner.codex_tools_dir.clone()?;
+    Some(
+      tools
+        .join("node_modules")
+        .join("@openai")
+        .join("codex")
+        .join("bin")
+        .join("codex.js"),
+    )
+  }
+
+  fn local_codex_version(&self) -> Option<String> {
+    let tools = self.inner.codex_tools_dir.clone()?;
+    let pkg = tools
+      .join("node_modules")
+      .join("@openai")
+      .join("codex")
+      .join("package.json");
+    let raw = fs::read_to_string(pkg).ok()?;
+    let v: Value = serde_json::from_str(&raw).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(|s| s.to_string())
+  }
+}
+
+#[cfg(windows)]
+fn npm_cmd() -> &'static str {
+  "npm.cmd"
+}
+#[cfg(not(windows))]
+fn npm_cmd() -> &'static str {
+  "npm"
+}
+
+fn node_cmd() -> &'static str {
+  "node"
+}
+
+async fn check_cmd_version(cmd: &str, args: &[&str]) -> Option<String> {
+  let mut c = Command::new(cmd);
+  c.args(args);
+  let out = match tokio::time::timeout(Duration::from_secs(8), c.output()).await {
+    Ok(Ok(o)) => o,
+    _ => return None,
+  };
+  if !out.status.success() {
+    return None;
+  }
+  let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+  if s.is_empty() {
+    return None;
+  }
+  Some(s)
+}
+
+#[cfg(windows)]
+fn codex_cmd() -> &'static str {
+  "codex.cmd"
+}
+#[cfg(not(windows))]
+fn codex_cmd() -> &'static str {
+  "codex"
 }
 
 impl CodexRuntime {

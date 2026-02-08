@@ -29,6 +29,10 @@ pub fn codex_home_dir(app: &AppHandle) -> Result<PathBuf, String> {
   Ok(app_data_dir(app)?.join("codex-home"))
 }
 
+pub fn codex_tools_dir(app: &AppHandle) -> Result<PathBuf, String> {
+  Ok(app_data_dir(app)?.join("codex-tools"))
+}
+
 pub fn codex_global_agents_override_path(app: &AppHandle) -> Result<PathBuf, String> {
   Ok(codex_home_dir(app)?.join("AGENTS.override.md"))
 }

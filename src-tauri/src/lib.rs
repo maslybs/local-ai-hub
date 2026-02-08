@@ -123,6 +123,7 @@ pub fn run() {
           .build(),
       )?;
       app.handle().plugin(tauri_plugin_dialog::init())?;
+      app.handle().plugin(tauri_plugin_shell::init())?;
 
       let cfg = load_or_default_config(app.handle());
       let cfg0 = cfg.clone();
@@ -161,6 +162,8 @@ pub fn run() {
       logs_clear,
       codex_status,
       codex_connect,
+      codex_doctor,
+      codex_install,
       codex_stop,
       codex_login_chatgpt,
       codex_logout,
@@ -185,6 +188,16 @@ async fn codex_status(state: State<'_, AppState>) -> Result<connectors::codex::t
 async fn codex_connect(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexStatus, String> {
   state.codex.connect().await?;
   Ok(state.codex.status().await)
+}
+
+#[tauri::command]
+async fn codex_doctor(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexDoctor, String> {
+  Ok(state.codex.doctor().await)
+}
+
+#[tauri::command]
+async fn codex_install(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexDoctor, String> {
+  state.codex.install_local_codex().await
 }
 
 #[tauri::command]

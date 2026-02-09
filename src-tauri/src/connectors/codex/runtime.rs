@@ -986,7 +986,15 @@ impl CodexRuntime {
       .map(|sec| sec.saturating_mul(1000));
 
     let mut items_out: Vec<CodexTranscriptItem> = vec![];
+    let mut in_progress = false;
     if let Some(turns) = thread.get("turns").and_then(|v| v.as_array()) {
+      if let Some(last) = turns.last() {
+        in_progress = last
+          .get("status")
+          .and_then(|v| v.as_str())
+          .map(|s| s == "inProgress")
+          .unwrap_or(false);
+      }
       for t in turns {
         let Some(items) = t.get("items").and_then(|v| v.as_array()) else { continue; };
         for it in items {
@@ -1009,7 +1017,7 @@ impl CodexRuntime {
       }
     }
 
-    Ok(CodexThreadReadResponse { id, title, preview, updated_at_unix_ms, items: items_out })
+    Ok(CodexThreadReadResponse { id, title, preview, updated_at_unix_ms, in_progress, items: items_out })
   }
 }
 

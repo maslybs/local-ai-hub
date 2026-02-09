@@ -188,6 +188,9 @@ export function CodexView({ codexReady }: CodexViewProps) {
           <div className="text-base font-semibold">Codex</div>
           <Badge variant={ready ? 'success' : 'warning'}>{ready ? t('codex.ready') : t('codex.setup')}</Badge>
           <Badge variant={authMode ? 'outline' : 'secondary'}>{authMode ?? t('codex.sign_in')}</Badge>
+          {selectedThread?.inProgress && (
+            <Badge variant="outline">{t('codex.thinking')}</Badge>
+          )}
         </div>
 
         <div className="flex items-center gap-2">

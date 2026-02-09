@@ -87,6 +87,7 @@ export const en = {
     install_confirm_body: 'Install Codex on this system? Node.js (npm) is required.',
     ready: 'Ready',
     setup: 'Setup',
+    thinking: 'Thinking',
   },
   connectors: {
     title: 'Connectors',

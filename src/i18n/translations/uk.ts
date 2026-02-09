@@ -87,6 +87,7 @@ export const uk = {
     install_confirm_body: 'Встановити Codex у цю систему? Потрібен Node.js (npm).',
     ready: 'Готово',
     setup: 'Налаштувати',
+    thinking: 'Думає',
   },
   connectors: {
     title: 'Конектори',

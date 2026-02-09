@@ -111,6 +111,7 @@ export type CodexThreadReadResponse = {
   title: string | null;
   preview: string | null;
   updatedAtUnixMs?: number | null;
+  inProgress?: boolean;
   items: CodexThreadReadItem[];
 };
 

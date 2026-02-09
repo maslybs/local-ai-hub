@@ -67,6 +67,9 @@ pub struct CodexThreadReadResponse {
   // Unix time in ms when thread was last updated (best-effort).
   #[serde(default)]
   pub updated_at_unix_ms: Option<u64>,
+  // Best-effort: whether the latest turn is still in progress.
+  #[serde(default)]
+  pub in_progress: bool,
   #[serde(default)]
   pub items: Vec<CodexTranscriptItem>,
 }

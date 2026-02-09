@@ -122,11 +122,11 @@ export function TelegramView({
                       checked={storageMode === 'file'}
                       onCheckedChange={async (checked) => {
                         setErr(null);
-                        const next: AppConfig = config ?? {
-                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
-                          codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
-                          ui: { language: null },
-                        };
+	                        const next: AppConfig = config ?? {
+	                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+	                          codex: { shared_history: false, workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+	                          ui: { language: null },
+	                        };
                         next.telegram.token_storage = checked ? 'file' : 'keychain';
                         try {
                           await onConfigChange(next);
@@ -192,11 +192,11 @@ export function TelegramView({
                           setErr(t('telegram.invalid_chat_id'));
                           return;
                         }
-                        const next: AppConfig = config ?? {
-                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
-                          codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
-                          ui: { language: null },
-                        };
+	                        const next: AppConfig = config ?? {
+	                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+	                          codex: { shared_history: false, workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+	                          ui: { language: null },
+	                        };
                         const set = new Set(next.telegram.allowed_chat_ids ?? []);
                         set.add(id);
                         next.telegram.allowed_chat_ids = Array.from(set);
@@ -221,11 +221,11 @@ export function TelegramView({
                           title="Remove"
                           onClick={async () => {
                             setErr(null);
-                            const next: AppConfig = config ?? {
-                              telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
-                              codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
-                              ui: { language: null },
-                            };
+	                            const next: AppConfig = config ?? {
+	                              telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+	                              codex: { shared_history: false, workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+	                              ui: { language: null },
+	                            };
                         next.telegram.allowed_chat_ids = (next.telegram.allowed_chat_ids ?? []).filter((x) => x !== id);
                         try {
                           await onConfigChange(next);
@@ -258,11 +258,11 @@ export function TelegramView({
                           setErr(t('telegram.invalid_timeout'));
                           return;
                         }
-                        const next: AppConfig = config ?? {
-                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
-                          codex: { workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
-                          ui: { language: null },
-                        };
+	                        const next: AppConfig = config ?? {
+	                          telegram: { allowed_chat_ids: [], poll_timeout_sec: 20, token_storage: 'keychain' },
+	                          codex: { shared_history: false, workspace_dir: null, universal_instructions: '', universal_fallback_only: true },
+	                          ui: { language: null },
+	                        };
                         next.telegram.poll_timeout_sec = Math.floor(v);
                         try {
                           await onConfigChange(next);

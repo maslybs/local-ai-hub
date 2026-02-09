@@ -18,6 +18,8 @@ export type TelegramConfig = {
 };
 
 export type CodexConfig = {
+  // If true, use the user's global Codex profile so history is shared with Codex App/CLI.
+  shared_history?: boolean;
   workspace_dir: string | null;
   universal_instructions?: string;
   universal_fallback_only?: boolean;
@@ -82,6 +84,34 @@ export type CodexDoctor = {
   local_codex_ok: boolean;
   local_codex_version: string | null;
   local_codex_entry: string | null;
+};
+
+export type CodexThreadSummary = {
+  id: string;
+  title: string | null;
+  preview: string | null;
+  updatedAtUnixMs: number | null;
+  createdAtUnixMs: number | null;
+  archived: boolean;
+  sourceKind: string | null;
+};
+
+export type CodexThreadListResponse = {
+  threads: CodexThreadSummary[];
+  nextCursor: string | null;
+};
+
+export type CodexThreadReadItem = {
+  role: 'user' | 'assistant' | string;
+  text: string;
+};
+
+export type CodexThreadReadResponse = {
+  id: string;
+  title: string | null;
+  preview: string | null;
+  updatedAtUnixMs?: number | null;
+  items: CodexThreadReadItem[];
 };
 
 export const backend = {
@@ -163,6 +193,16 @@ export const backend = {
   async codexDoctor(): Promise<CodexDoctor> {
     const invoke = await getInvoke();
     return invoke<CodexDoctor>('codex_doctor');
+  },
+
+  async codexThreadList(limit = 30, cursor: string | null = null): Promise<CodexThreadListResponse> {
+    const invoke = await getInvoke();
+    return invoke<CodexThreadListResponse>('codex_thread_list', { limit, cursor });
+  },
+
+  async codexThreadRead(threadId: string, maxItems = 120): Promise<CodexThreadReadResponse> {
+    const invoke = await getInvoke();
+    return invoke<CodexThreadReadResponse>('codex_thread_read', { threadId, maxItems });
   },
 
   async codexInstall(): Promise<CodexDoctor> {

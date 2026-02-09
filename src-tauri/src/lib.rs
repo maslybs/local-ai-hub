@@ -38,6 +38,7 @@ async fn save_config(app: AppHandle, state: State<'_, AppState>, cfg: config_sto
   }
 
   // Keep Codex runtime in sync with config changes (workspace folder influences AGENTS.md and tool context).
+  state.codex.set_shared_history(cfg.codex.shared_history).await;
   state.codex.set_workspace_dir(cfg.codex.workspace_dir.clone()).await;
   state
     .codex
@@ -132,6 +133,7 @@ pub fn run() {
       logs.push(logbus::LogLevel::Info, "app", "startup");
 
       let codex = CodexRuntime::new(app.handle(), logs.clone());
+      tauri::async_runtime::block_on(codex.set_shared_history(cfg0.codex.shared_history));
       tauri::async_runtime::block_on(codex.set_workspace_dir(cfg0.codex.workspace_dir.clone()));
       tauri::async_runtime::block_on(codex.set_universal_instructions(
         cfg0.codex.universal_instructions.clone(),
@@ -163,6 +165,8 @@ pub fn run() {
       codex_status,
       codex_connect,
       codex_doctor,
+      codex_thread_list,
+      codex_thread_read,
       codex_install,
       codex_stop,
       codex_login_chatgpt,
@@ -193,6 +197,24 @@ async fn codex_connect(state: State<'_, AppState>) -> Result<connectors::codex::
 #[tauri::command]
 async fn codex_doctor(state: State<'_, AppState>) -> Result<connectors::codex::types::CodexDoctor, String> {
   Ok(state.codex.doctor().await)
+}
+
+#[tauri::command]
+async fn codex_thread_list(
+  state: State<'_, AppState>,
+  limit: Option<u32>,
+  cursor: Option<String>,
+) -> Result<connectors::codex::types::CodexThreadListResponse, String> {
+  Ok(state.codex.list_threads(limit.unwrap_or(30), cursor).await?)
+}
+
+#[tauri::command]
+async fn codex_thread_read(
+  state: State<'_, AppState>,
+  thread_id: String,
+  max_items: Option<u32>,
+) -> Result<connectors::codex::types::CodexThreadReadResponse, String> {
+  Ok(state.codex.read_thread(thread_id, max_items.unwrap_or(120)).await?)
 }
 
 #[tauri::command]

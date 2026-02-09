@@ -41,6 +41,11 @@ impl Default for TelegramConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexConfig {
+  // Whether Codex should use the user's global profile (~/.codex) so history is shared with Codex App/CLI.
+  // If false, Local AI Hub uses its own isolated profile under app_data_dir.
+  #[serde(default)]
+  pub shared_history: bool,
+
   // Folder that Codex should treat as the "workspace" (used for AGENTS.md and tool context).
   // If not set, we fall back to current working directory of the app process.
   #[serde(default)]
@@ -60,6 +65,7 @@ pub struct CodexConfig {
 impl Default for CodexConfig {
   fn default() -> Self {
     Self {
+      shared_history: false,
       workspace_dir: None,
       universal_instructions: String::new(),
       universal_fallback_only: default_universal_fallback_only(),

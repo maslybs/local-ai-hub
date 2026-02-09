@@ -14,6 +14,9 @@ import { backend } from '@/lib/backend';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { useI18n } from '@/i18n/I18nContext';
+import { Switch } from '@/components/ui/switch';
+import type { CodexThreadReadResponse, CodexThreadSummary } from '@/lib/backend';
+import { listen } from '@tauri-apps/api/event';
 
 type CodexViewProps = {
   codexReady: boolean;
@@ -28,6 +31,119 @@ export function CodexView({ codexReady }: CodexViewProps) {
   const [workspaceDir, setWorkspaceDir] = React.useState<string>('');
   const [universalInstructions, setUniversalInstructions] = React.useState<string>('');
   const [fallbackOnly, setFallbackOnly] = React.useState<boolean>(true);
+  const [sharedHistory, setSharedHistory] = React.useState<boolean>(false);
+  const [threads, setThreads] = React.useState<CodexThreadSummary[] | null>(null);
+  const [threadsBusy, setThreadsBusy] = React.useState(false);
+  const [threadsCursor, setThreadsCursor] = React.useState<string | null>(null);
+  const [threadsErr, setThreadsErr] = React.useState<string | null>(null);
+  const [selectedThread, setSelectedThread] = React.useState<CodexThreadReadResponse | null>(null);
+  const [threadReadBusy, setThreadReadBusy] = React.useState(false);
+  const selectedThreadUpdatedAt = selectedThread?.updatedAtUnixMs ?? null;
+
+  const refreshThreads = React.useCallback(async () => {
+    setThreadsBusy(true);
+    setThreadsErr(null);
+    try {
+      const res = await backend.codexThreadList(40, null);
+      setThreads(res.threads ?? []);
+      setThreadsCursor(res.nextCursor ?? null);
+    } catch (e: any) {
+      setThreadsErr(e?.message ?? String(e));
+      setThreads(null);
+      setThreadsCursor(null);
+    } finally {
+      setThreadsBusy(false);
+    }
+  }, []);
+
+  const loadMoreThreads = React.useCallback(async () => {
+    if (!threadsCursor) return;
+    setThreadsBusy(true);
+    setThreadsErr(null);
+    try {
+      const res = await backend.codexThreadList(40, threadsCursor);
+      setThreads((prev) => [...(prev ?? []), ...(res.threads ?? [])]);
+      setThreadsCursor(res.nextCursor ?? null);
+    } catch (e: any) {
+      setThreadsErr(e?.message ?? String(e));
+    } finally {
+      setThreadsBusy(false);
+    }
+  }, [threadsCursor]);
+
+  const openThread = React.useCallback(async (id: string) => {
+    setThreadReadBusy(true);
+    setThreadsErr(null);
+    try {
+      const r = await backend.codexThreadRead(id, 140);
+      setSelectedThread(r);
+    } catch (e: any) {
+      setThreadsErr(e?.message ?? String(e));
+    } finally {
+      setThreadReadBusy(false);
+    }
+  }, []);
+
+  // Real-time: when this app-server completes a turn, refresh the open thread (if any).
+  React.useEffect(() => {
+    let unlisten: null | (() => void) = null;
+    (async () => {
+      try {
+        const u = await listen<{ threadId?: string }>('codex://thread_changed', async (event) => {
+          const threadId = event.payload?.threadId;
+          if (!threadId) return;
+          if (selectedThread?.id !== threadId) return;
+          try {
+            const r = await backend.codexThreadRead(threadId, 140);
+            setSelectedThread(r);
+          } catch {
+            // ignore
+          }
+        });
+        unlisten = () => u();
+      } catch {
+        // ignore (non-Tauri / no event system)
+      }
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [selectedThread?.id]);
+
+  // Realtime across processes is not supported by app-server notifications (they only reflect this process).
+  // To reflect updates made in another Codex client, we poll `thread/read` while the thread dialog is open.
+  React.useEffect(() => {
+    if (!selectedThread?.id) return;
+    let stopped = false;
+    let inFlight = false;
+    const threadId = selectedThread.id;
+
+    const tick = async () => {
+      if (stopped) return;
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const r = await backend.codexThreadRead(threadId, 140);
+        if (stopped) return;
+        // Only update state if we observe a change; helps avoid flicker.
+        if ((r.updatedAtUnixMs ?? null) !== selectedThreadUpdatedAt || (r.items?.length ?? 0) !== (selectedThread.items?.length ?? 0)) {
+          setSelectedThread(r);
+        }
+      } catch {
+        // ignore
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const t = window.setInterval(tick, 1500);
+    // Also do one immediate refresh to pick up latest.
+    void tick();
+    return () => {
+      stopped = true;
+      window.clearInterval(t);
+    };
+  }, [selectedThread?.id, selectedThreadUpdatedAt, selectedThread?.items?.length]);
 
   React.useEffect(() => {
     let alive = true;
@@ -40,6 +156,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
           setWorkspaceDir(cfg.value?.codex?.workspace_dir ?? '');
           setUniversalInstructions(cfg.value?.codex?.universal_instructions ?? '');
           setFallbackOnly(cfg.value?.codex?.universal_fallback_only ?? true);
+          setSharedHistory(Boolean(cfg.value?.codex?.shared_history));
         }
         if (doc.status === 'fulfilled') setDoctor(doc.value);
       } catch {
@@ -56,6 +173,14 @@ export function CodexView({ codexReady }: CodexViewProps) {
   const lastError = status?.last_error ?? null;
   const ready = Boolean(status?.initialized);
   const codexInstalled = Boolean(doctor?.local_codex_ok);
+
+  // Auto-load history once per session when Codex becomes ready.
+  React.useEffect(() => {
+    if (!ready) return;
+    if (threads !== null) return;
+    void refreshThreads();
+  }, [ready, threads, refreshThreads]);
+
   return (
     <div className="rounded-2xl border border-border/60 bg-card/70 backdrop-blur-xl shadow-sm overflow-hidden">
       <div className="flex items-center justify-between px-5 py-4 border-b border-border/50">
@@ -100,7 +225,7 @@ export function CodexView({ codexReady }: CodexViewProps) {
               </Button>
             </DialogTrigger>
 
-            <DialogContent className="max-w-xl">
+            <DialogContent className="max-w-xl max-h-[80vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>{t('codex.settings')}</DialogTitle>
                 <DialogDescription />
@@ -176,6 +301,35 @@ export function CodexView({ codexReady }: CodexViewProps) {
                 )}
 
                 <div className="rounded-xl bg-muted/20 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium">{t('codex.shared_history')}</div>
+                    <Switch
+                      checked={sharedHistory}
+                      onCheckedChange={async (checked) => {
+                        setSharedHistory(checked);
+                        setBusy(true);
+                        setErr(null);
+                        try {
+                          const cfg = await backend.getConfig();
+                          cfg.codex.shared_history = checked;
+                          await backend.saveConfig(cfg);
+                          try {
+                            const st = await backend.codexConnect();
+                            setStatus(st);
+                          } catch {
+                            // ignore
+                          }
+                        } catch (e: any) {
+                          setErr(e?.message ?? String(e));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-muted/20 p-4">
                   <div className="text-sm font-medium">{t('codex.workspace')}</div>
                   <div className="mt-3 flex gap-2">
                     <Input
@@ -210,11 +364,24 @@ export function CodexView({ codexReady }: CodexViewProps) {
                         setErr(null);
                         try {
                           const cfg = await backend.getConfig();
-                          cfg.codex = cfg.codex ?? { workspace_dir: null };
+                          cfg.codex = cfg.codex ?? {
+                            shared_history: false,
+                            workspace_dir: null,
+                            universal_instructions: '',
+                            universal_fallback_only: true,
+                          };
+                          cfg.codex.shared_history = sharedHistory;
                           cfg.codex.workspace_dir = workspaceDir.trim() ? workspaceDir.trim() : null;
                           cfg.codex.universal_instructions = universalInstructions;
                           cfg.codex.universal_fallback_only = fallbackOnly;
                           await backend.saveConfig(cfg);
+                          try {
+                            // Apply changes immediately (switching shared history restarts the server).
+                            const st = await backend.codexConnect();
+                            setStatus(st);
+                          } catch {
+                            // ignore
+                          }
                         } catch (e: any) {
                           setErr(e?.message ?? String(e));
                         } finally {
@@ -336,12 +503,101 @@ export function CodexView({ codexReady }: CodexViewProps) {
         </div>
       </div>
 
+      <div className="px-5 py-4 border-b border-border/50">
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-sm font-medium">{t('codex.threads')}</div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={threadsBusy || busy || !ready}
+              onClick={refreshThreads}
+              title={t('common.refresh')}
+            >
+              {threadsBusy ? '...' : t('common.refresh')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={threadsBusy || busy || !threadsCursor || !ready}
+              onClick={loadMoreThreads}
+              title={t('common.more')}
+            >
+              {t('common.more')}
+            </Button>
+          </div>
+        </div>
+
+        {threadsErr && <div className="mt-3 text-sm text-destructive">{threadsErr}</div>}
+
+        {threads && threads.length === 0 && !threadsErr && (
+          <div className="mt-3 text-sm text-muted-foreground">{t('codex.threads_empty')}</div>
+        )}
+
+        {threads && threads.length > 0 && (
+          <div className="mt-3 max-h-80 overflow-y-auto pr-1 space-y-2">
+            {threads.map((th, idx) => (
+              <button
+                key={th.id}
+                className="w-full text-left flex items-start gap-3 rounded-lg border border-border/40 bg-background/30 px-3 py-2 hover:bg-background/40 transition-colors"
+                onClick={() => openThread(th.id)}
+                title={t('codex.open_thread')}
+              >
+                <div className="text-[11px] text-muted-foreground pt-0.5">{idx + 1}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm truncate">
+                    {th.title || th.preview || t('codex.thread_untitled')}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground truncate">
+                    {th.updatedAtUnixMs ? new Date(th.updatedAtUnixMs).toLocaleString() : ''}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {threadReadBusy && (
+          <div className="mt-2 text-xs text-muted-foreground">{t('codex.loading')}</div>
+        )}
+      </div>
+
       {(err || lastError) && (
         <div className="px-5 py-3">
           {err && <div className="text-sm text-destructive">{err}</div>}
           {!err && lastError && <div className="text-sm text-destructive">{lastError}</div>}
         </div>
       )}
+
+      <Dialog open={Boolean(selectedThread)} onOpenChange={(o) => { if (!o) setSelectedThread(null); }}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{selectedThread?.title || selectedThread?.preview || t('codex.thread_untitled')}</DialogTitle>
+            <DialogDescription />
+          </DialogHeader>
+
+          <div className="space-y-3">
+            {(selectedThread?.items ?? []).length === 0 && (
+              <div className="text-sm text-muted-foreground">{t('codex.thread_empty')}</div>
+            )}
+            <div className="max-h-[60vh] overflow-y-auto pr-1 space-y-2">
+              {(selectedThread?.items ?? []).map((it, i) => (
+                <div
+                  key={i}
+                  className={it.role === 'user'
+                    ? 'rounded-xl border border-border/40 bg-background/30 px-3 py-2'
+                    : 'rounded-xl border border-border/40 bg-muted/20 px-3 py-2'}
+                >
+                  <div className="text-[11px] text-muted-foreground mb-1">
+                    {it.role === 'user' ? t('codex.you') : t('codex.assistant')}
+                  </div>
+                  <div className="text-sm whitespace-pre-wrap">{it.text}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

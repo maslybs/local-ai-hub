@@ -11,14 +11,20 @@ use std::{
 };
 
 use serde_json::Value;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::{
   io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
   process::{Child, ChildStdin, Command},
   sync::{mpsc, oneshot, Mutex, RwLock},
 };
 
-use super::types::{CodexDoctor, CodexStatus};
+use super::types::{
+  CodexDoctor,
+  CodexStatus,
+  CodexThreadListResponse,
+  CodexThreadReadResponse,
+  CodexTranscriptItem,
+};
 use crate::core::{logbus, paths};
 use std::collections::VecDeque;
 
@@ -33,6 +39,7 @@ pub struct CodexStream {
 }
 
 struct Inner {
+  app: AppHandle,
   status: RwLock<CodexStatus>,
   child: Mutex<Option<Child>>,
   stdin: Mutex<Option<BufWriter<ChildStdin>>>,
@@ -46,17 +53,20 @@ struct Inner {
   resumed_threads: Mutex<HashSet<String>>,
   busy_chats: Mutex<HashSet<i64>>,
   chat_threads_path: Option<PathBuf>,
-  codex_home_dir: Option<PathBuf>,
+  // Local AI Hub's isolated Codex profile root (under app_data_dir).
+  app_codex_home_dir: Option<PathBuf>,
   codex_tools_dir: Option<PathBuf>,
   app_global_agents_override: Option<PathBuf>,
   logs: logbus::LogBus,
   default_cwd: RwLock<Option<String>>,
   universal_instructions: RwLock<String>,
   universal_fallback_only: RwLock<bool>,
+  shared_history: RwLock<bool>,
 }
 
 struct PendingTurn {
   chat_id: i64,
+  thread_id: String,
   full_text: String,
   sent_byte: usize,
   updates_tx: mpsc::UnboundedSender<String>,
@@ -66,7 +76,7 @@ struct PendingTurn {
 impl CodexRuntime {
   pub fn new(app: &AppHandle, logs: logbus::LogBus) -> Self {
     let (chat_threads_path, chat_threads) = load_chat_threads(app);
-    let codex_home_dir = paths::codex_home_dir(app).ok();
+    let app_codex_home_dir = paths::codex_home_dir(app).ok();
     let codex_tools_dir = paths::codex_tools_dir(app).ok();
     let app_global_agents_override = paths::codex_global_agents_override_path(app).ok();
     let default_cwd = std::env::current_dir()
@@ -74,6 +84,7 @@ impl CodexRuntime {
       .and_then(|p| p.to_str().map(|s| s.to_string()));
     Self {
       inner: Arc::new(Inner {
+        app: app.clone(),
         status: RwLock::new(CodexStatus::default()),
         child: Mutex::new(None),
         stdin: Mutex::new(None),
@@ -87,15 +98,41 @@ impl CodexRuntime {
         resumed_threads: Mutex::new(HashSet::new()),
         busy_chats: Mutex::new(HashSet::new()),
         chat_threads_path,
-        codex_home_dir,
+        app_codex_home_dir,
         codex_tools_dir,
         app_global_agents_override,
         logs,
         default_cwd: RwLock::new(default_cwd),
         universal_instructions: RwLock::new(String::new()),
         universal_fallback_only: RwLock::new(true),
+        shared_history: RwLock::new(false),
       }),
     }
+  }
+
+  pub async fn set_shared_history(&self, shared: bool) {
+    let cur = *self.inner.shared_history.read().await;
+    if cur == shared {
+      return;
+    }
+
+    {
+      let mut w = self.inner.shared_history.write().await;
+      *w = shared;
+    }
+
+    // Switching profiles invalidates any persisted thread ids.
+    let _ = self.reset_threads().await;
+
+    // Force restart so CODEX_HOME takes effect immediately.
+    let _ = self.stop().await;
+    self
+      .inner
+      .logs
+      .push(logbus::LogLevel::Warn, "codex", if shared { "shared history enabled" } else { "shared history disabled" });
+
+    // Best-effort: prepare profile content (auth import / override file) for the new home.
+    self.prepare_codex_home().await;
   }
 
   pub async fn set_workspace_dir(&self, workspace_dir: Option<String>) {
@@ -174,6 +211,153 @@ impl CodexRuntime {
 
   pub async fn connect(&self) -> Result<(), String> {
     self.ensure_initialized().await
+  }
+
+  pub async fn list_threads(
+    &self,
+    limit: u32,
+    cursor: Option<String>,
+  ) -> Result<CodexThreadListResponse, String> {
+    self.ensure_initialized().await?;
+    self.ensure_account_ready().await?;
+
+    // Avoid filtering by sourceKinds: different Codex clients/versions may use different identifiers,
+    // and the filter can accidentally exclude everything.
+    let mut params = serde_json::json!({
+      "limit": limit.clamp(1, 100),
+      "includeArchived": true
+    });
+    if let Some(c) = cursor.and_then(|s| {
+      let t = s.trim().to_string();
+      if t.is_empty() { None } else { Some(t) }
+    }) {
+      params["cursor"] = Value::String(c);
+    }
+
+    let res = self.send_request("thread/list", params).await?;
+
+    // Be liberal in what we accept: app-server response shapes have differed across versions.
+    let threads_val = res
+      .get("threads")
+      .or_else(|| res.get("items"))
+      .or_else(|| res.get("data"))
+      .or_else(|| res.get("result").and_then(|r| r.get("threads")))
+      .or_else(|| res.get("result").and_then(|r| r.get("items")))
+      .cloned()
+      .unwrap_or(Value::Array(vec![]));
+
+    let next_cursor = res
+      .get("nextCursor")
+      .or_else(|| res.get("next_cursor"))
+      .or_else(|| res.get("result").and_then(|r| r.get("nextCursor")))
+      .and_then(|v| v.as_str())
+      .map(|s| s.to_string());
+
+    let mut threads = vec![];
+    if let Value::Array(items) = threads_val {
+      for it in items {
+        let id = it
+          .get("id")
+          .and_then(|v| v.as_str())
+          .or_else(|| it.get("thread").and_then(|t| t.get("id")).and_then(|v| v.as_str()))
+          .unwrap_or("")
+          .to_string();
+        if id.is_empty() {
+          continue;
+        }
+
+        let title = it
+          .get("title")
+          .and_then(|v| v.as_str())
+          .or_else(|| it.get("name").and_then(|v| v.as_str()))
+          .map(|s| s.to_string());
+
+        let archived = it
+          .get("archived")
+          .and_then(|v| v.as_bool())
+          .or_else(|| it.get("isArchived").and_then(|v| v.as_bool()))
+          .unwrap_or(false);
+
+        let source_kind = it
+          .get("sourceKind")
+          .and_then(|v| v.as_str())
+          .or_else(|| it.get("source_kind").and_then(|v| v.as_str()))
+          .map(|s| s.to_string());
+
+        let preview = it
+          .get("preview")
+          .and_then(|v| v.as_str())
+          .or_else(|| it.get("summary").and_then(|v| v.as_str()))
+          .map(|s| s.to_string());
+
+        // Optional; protocol typically uses unix seconds for createdAt/updatedAt.
+        let updated_at_unix_ms = it
+          .get("updatedAtUnixMs")
+          .and_then(|v| v.as_u64())
+          .or_else(|| it.get("updated_at_unix_ms").and_then(|v| v.as_u64()))
+          .or_else(|| it.get("updatedAt").and_then(|v| v.as_u64()).map(|s| s.saturating_mul(1000)))
+          .or_else(|| it.get("updated_at").and_then(|v| v.as_u64()).map(|s| s.saturating_mul(1000)));
+
+        let created_at_unix_ms = it
+          .get("createdAtUnixMs")
+          .and_then(|v| v.as_u64())
+          .or_else(|| it.get("created_at_unix_ms").and_then(|v| v.as_u64()))
+          .or_else(|| it.get("createdAt").and_then(|v| v.as_u64()).map(|s| s.saturating_mul(1000)))
+          .or_else(|| it.get("created_at").and_then(|v| v.as_u64()).map(|s| s.saturating_mul(1000)));
+
+        threads.push(super::types::CodexThreadSummary {
+          id,
+          title,
+          preview,
+          updated_at_unix_ms,
+          created_at_unix_ms,
+          archived,
+          source_kind,
+        });
+      }
+    }
+
+    self.inner.logs.push(
+      logbus::LogLevel::Info,
+      "codex",
+      format!("thread/list -> {} threads", threads.len()),
+    );
+
+    Ok(CodexThreadListResponse {
+      threads,
+      next_cursor,
+    })
+  }
+
+  pub async fn get_chat_thread(&self, chat_id: i64) -> Option<String> {
+    self.inner.chat_threads.lock().await.get(&chat_id).cloned()
+  }
+
+  pub async fn attach_chat_to_thread(&self, chat_id: i64, thread_id: String) -> Result<(), String> {
+    self.ensure_initialized().await?;
+    self.ensure_account_ready().await?;
+
+    let thread_id = thread_id.trim().to_string();
+    if thread_id.is_empty() {
+      return Err("Empty thread id".to_string());
+    }
+
+    // Persist mapping first so subsequent messages use this thread.
+    {
+      let mut guard = self.inner.chat_threads.lock().await;
+      guard.insert(chat_id, thread_id.clone());
+      persist_chat_threads(self.inner.chat_threads_path.as_ref(), &guard)?;
+    }
+
+    // Force resume on next use.
+    {
+      let mut resumed = self.inner.resumed_threads.lock().await;
+      resumed.remove(&thread_id);
+    }
+
+    // Validate/resume now so the user gets fast feedback.
+    self.resume_thread_if_needed(&thread_id).await?;
+    Ok(())
   }
 
   pub async fn doctor(&self) -> CodexDoctor {
@@ -579,6 +763,7 @@ impl CodexRuntime {
         turn_id.clone(),
         PendingTurn {
           chat_id,
+          thread_id: thread_id.clone(),
           full_text: String::new(),
           sent_byte: 0,
           updates_tx,
@@ -764,14 +949,102 @@ impl CodexRuntime {
     w.flush().await.map_err(|e| format!("flush failed: {e}"))?;
     Ok(())
   }
+
+  pub async fn read_thread(&self, thread_id: String, max_items: u32) -> Result<CodexThreadReadResponse, String> {
+    self.ensure_initialized().await?;
+    self.ensure_account_ready().await?;
+
+    let thread_id = thread_id.trim().to_string();
+    if thread_id.is_empty() {
+      return Err("Empty thread id".to_string());
+    }
+
+    let params = serde_json::json!({
+      "threadId": thread_id,
+      "includeTurns": true
+    });
+    let res = self.send_request("thread/read", params).await?;
+
+    let thread = res
+      .get("thread")
+      .cloned()
+      .or_else(|| res.get("result").and_then(|r| r.get("thread")).cloned())
+      .unwrap_or(res.clone());
+
+    let id = thread
+      .get("id")
+      .and_then(|v| v.as_str())
+      .unwrap_or("")
+      .to_string();
+
+    let title = thread.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let preview = thread.get("preview").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let updated_at_unix_ms = thread
+      .get("updatedAt")
+      .and_then(|v| v.as_i64())
+      .and_then(|sec| u64::try_from(sec).ok())
+      .map(|sec| sec.saturating_mul(1000));
+
+    let mut items_out: Vec<CodexTranscriptItem> = vec![];
+    if let Some(turns) = thread.get("turns").and_then(|v| v.as_array()) {
+      for t in turns {
+        let Some(items) = t.get("items").and_then(|v| v.as_array()) else { continue; };
+        for it in items {
+          if items_out.len() >= max_items.max(1).min(600) as usize {
+            break;
+          }
+          let Some(ty) = it.get("type").and_then(|v| v.as_str()) else { continue; };
+          let role = match ty {
+            "userMessage" => "user",
+            "agentMessage" => "assistant",
+            _ => continue,
+          };
+          let Some(text) = extract_codex_item_text(it) else { continue; };
+          let text = text.trim().to_string();
+          if text.is_empty() {
+            continue;
+          }
+          items_out.push(CodexTranscriptItem { role: role.to_string(), text });
+        }
+      }
+    }
+
+    Ok(CodexThreadReadResponse { id, title, preview, updated_at_unix_ms, items: items_out })
+  }
+}
+
+fn extract_codex_item_text(it: &Value) -> Option<String> {
+  // Common shape: { type: "userMessage"|"agentMessage", text: "..." }
+  if let Some(s) = it.get("text").and_then(|v| v.as_str()) {
+    return Some(s.to_string());
+  }
+  // Sometimes nested: { message: { text: "..." } }
+  if let Some(s) = it.get("message").and_then(|m| m.get("text")).and_then(|v| v.as_str()) {
+    return Some(s.to_string());
+  }
+  // Content array: { content: [{ type:"text", text:"..."}, ...] }
+  if let Some(arr) = it.get("content").and_then(|v| v.as_array()) {
+    let mut out = String::new();
+    for c in arr {
+      if let Some(s) = c.get("text").and_then(|v| v.as_str()) {
+        if !out.is_empty() {
+          out.push('\n');
+        }
+        out.push_str(s);
+      }
+    }
+    if !out.trim().is_empty() {
+      return Some(out);
+    }
+  }
+  None
 }
 
 impl CodexRuntime {
   async fn spawn_codex_app_server(&self) -> Result<Child, String> {
     let env_home = self
-      .inner
-      .codex_home_dir
-      .clone()
+      .effective_codex_home_dir()
+      .await
       .and_then(|p| p.to_str().map(|s| s.to_string()));
 
     // Preferred: run the app-local Codex install (no global dependency).
@@ -786,9 +1059,14 @@ impl CodexRuntime {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-      if let Some(home) = env_home.clone() {
-        cmd.env("CODEX_HOME", home);
-      }
+      let home = env_home.clone().ok_or_else(|| "codex home dir unavailable".to_string())?;
+      let shared = *self.inner.shared_history.read().await;
+      self.inner.logs.push(
+        logbus::LogLevel::Info,
+        "codex",
+        format!("CODEX_HOME={home} ({})", if shared { "shared" } else { "isolated" }),
+      );
+      cmd.env("CODEX_HOME", home);
       return match cmd.spawn() {
         Ok(c) => Ok(c),
         Err(e) => self
@@ -814,63 +1092,50 @@ impl CodexRuntime {
     Err(msg)
   }
 
+  async fn effective_codex_home_dir(&self) -> Option<PathBuf> {
+    let shared = *self.inner.shared_history.read().await;
+    if shared {
+      user_default_codex_home_dir()
+    } else {
+      self.inner.app_codex_home_dir.clone()
+    }
+  }
+
   async fn prepare_codex_home(&self) {
-    let Some(home) = self.inner.codex_home_dir.clone() else { return; };
+    let Some(home) = self.effective_codex_home_dir().await else { return; };
     let _ = fs::create_dir_all(&home);
 
-    // If the user is already logged into Codex (e.g. via Codex Desktop), import auth so this app
-    // works "immediately" without forcing a second login flow.
-    self.import_user_codex_auth(&home).await;
+    let shared = *self.inner.shared_history.read().await;
 
-    // Best-effort: reuse user's installed skills by linking ~/.codex/skills into our app profile.
-    // This avoids surprising "no skills" behavior when we isolate CODEX_HOME.
-    #[cfg(unix)]
-    {
-      use std::os::unix::fs as unix_fs;
-      let skills_dst = home.join("skills");
-      if !skills_dst.exists() {
-        if let Some(home_dir) = std::env::var_os("HOME") {
-          let skills_src = PathBuf::from(home_dir).join(".codex").join("skills");
-          if skills_src.exists() {
-            let _ = unix_fs::symlink(&skills_src, &skills_dst);
+    if !shared {
+      // If the user is already logged into Codex (e.g. via Codex Desktop), import auth so this app
+      // works "immediately" without forcing a second login flow.
+      self.import_user_codex_auth(&home).await;
+    }
+
+    if !shared {
+      // Best-effort: reuse user's installed skills by linking ~/.codex/skills into our app profile.
+      // This avoids surprising "no skills" behavior when we isolate CODEX_HOME.
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs as unix_fs;
+        let skills_dst = home.join("skills");
+        if !skills_dst.exists() {
+          if let Some(home_dir) = std::env::var_os("HOME") {
+            let skills_src = PathBuf::from(home_dir).join(".codex").join("skills");
+            if skills_src.exists() {
+              let _ = unix_fs::symlink(&skills_src, &skills_dst);
+            }
           }
         }
       }
     }
 
-    // Profile migration guard:
-    // We run Codex app-server with an app-specific CODEX_HOME (state db lives there).
-    // Old Telegram chat -> thread mappings created under a different CODEX_HOME (e.g. default ~/.codex)
-    // are invalid in this profile and cause "no rollout found" errors. Clear them once.
-    let marker = home.join(".local-ai-hub-profile-v1");
-    if !marker.exists() {
-      let _ = fs::write(&marker, "v1\n");
-      #[cfg(unix)]
-      {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&marker, fs::Permissions::from_mode(0o600));
-      }
-
-      {
-        let mut resumed = self.inner.resumed_threads.lock().await;
-        resumed.clear();
-      }
-      {
-        let mut threads = self.inner.chat_threads.lock().await;
-        if !threads.is_empty() {
-          threads.clear();
-          let _ = persist_chat_threads(self.inner.chat_threads_path.as_ref(), &threads);
-        }
-      }
-
-      self.inner.logs.push(
-        logbus::LogLevel::Warn,
-        "codex",
-        "initialized CODEX_HOME profile; cleared old chat thread mappings".to_string(),
-      );
-    }
-
     // Write/clear the app-global AGENTS.override.md based on config and workspace contents.
+    // In shared-history mode we avoid touching the user's global Codex profile files.
+    if shared {
+      return;
+    }
     let Some(override_path) = self.inner.app_global_agents_override.clone() else { return; };
     let instructions = self.inner.universal_instructions.read().await.clone();
     let fallback_only = *self.inner.universal_fallback_only.read().await;
@@ -1108,6 +1373,26 @@ fn codex_cmd() -> &'static str {
   "codex"
 }
 
+fn user_default_codex_home_dir() -> Option<PathBuf> {
+  // Codex App/CLI default profile location.
+  #[cfg(windows)]
+  {
+    if let Some(p) = std::env::var_os("USERPROFILE") {
+      return Some(PathBuf::from(p).join(".codex"));
+    }
+    let drive = std::env::var_os("HOMEDRIVE");
+    let path = std::env::var_os("HOMEPATH");
+    if let (Some(d), Some(p)) = (drive, path) {
+      return Some(PathBuf::from(format!("{}{}", d.to_string_lossy(), p.to_string_lossy())).join(".codex"));
+    }
+    None
+  }
+  #[cfg(not(windows))]
+  {
+    std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".codex"))
+  }
+}
+
 impl CodexRuntime {
   async fn reset_thread_everywhere(&self, thread_id: &str) {
     let thread_id = thread_id.to_string();
@@ -1226,6 +1511,12 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
       if let Some(p) = turns.get_mut(&turn_id) {
         p.full_text.push_str(delta);
         flush_turn_chunks(p, false);
+
+        // Best-effort: notify UI so an open thread can refresh or show "typing".
+        let _ = inner.app.emit(
+          "codex://thread_delta",
+          serde_json::json!({ "threadId": p.thread_id, "delta": delta }),
+        );
       }
     }
     "item/completed" => {
@@ -1279,6 +1570,12 @@ async fn handle_server_msg(inner: Arc<Inner>, msg: Value) {
         } else {
           let _ = p.done.send(Ok(p.full_text));
         }
+
+        // Notify UI that a thread has new content. The UI can call thread/read to refresh.
+        let _ = inner.app.emit(
+          "codex://thread_changed",
+          serde_json::json!({ "threadId": p.thread_id, "turnId": turn_id, "status": status }),
+        );
       }
     }
     "error" => {

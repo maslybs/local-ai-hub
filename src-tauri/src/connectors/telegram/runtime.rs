@@ -1,4 +1,4 @@
-use std::{error::Error, fs, sync::Arc, time::Duration};
+use std::{collections::HashMap, error::Error, fs, sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde::Deserialize;
@@ -99,6 +99,9 @@ impl TelegramRuntime {
         }
       };
 
+      // Cache of the most recent /threads results per chat, so user can select by number (/thread 3).
+      let mut last_threads: HashMap<i64, Vec<String>> = HashMap::new();
+
       loop {
         if *rx.borrow() {
           break;
@@ -194,6 +197,97 @@ impl TelegramRuntime {
                       message_id,
                       prompt,
                     );
+                  }
+                  Some("/threads") => {
+                    let allowed = cfg.telegram.allowed_chat_ids.contains(&chat_id);
+                    if !allowed {
+                      if let Err(e) = tg_send_message(&client, &token, chat_id, NO_ACCESS_MSG, Some(message_id)).await {
+                        log::info!("telegram: send /threads deny failed: {e}");
+                      }
+                      continue;
+                    }
+
+                    let res = runtime.inner.codex.list_threads(20, None).await;
+                    let body = match res {
+                      Ok(r) => {
+                        if r.threads.is_empty() {
+                          "Поки що немає діалогів.".to_string()
+                        } else {
+                          last_threads.insert(chat_id, r.threads.iter().take(10).map(|t| t.id.clone()).collect());
+                          let mut out = String::new();
+                          out.push_str("Останні діалоги:\n");
+                          for (i, th) in r.threads.iter().take(10).enumerate() {
+                            let title = th
+                              .title
+                              .clone()
+                              .or_else(|| th.preview.clone())
+                              .unwrap_or_else(|| "Діалог".to_string());
+                            out.push_str(&format!("\n{}. {title}", i + 1));
+                          }
+                          out.push_str("\n\nПродовжити: /thread <номер> (наприклад /thread 1)");
+                          out.trim().to_string()
+                        }
+                      }
+                      Err(e) => format!("Codex error: {e}"),
+                    };
+                    if let Err(e) = tg_send_message_series(&client, &token, chat_id, &body, Some(message_id)).await {
+                      log::info!("telegram: send /threads reply failed: {e}");
+                    }
+                  }
+                  Some("/thread") => {
+                    let allowed = cfg.telegram.allowed_chat_ids.contains(&chat_id);
+                    if !allowed {
+                      if let Err(e) = tg_send_message(&client, &token, chat_id, NO_ACCESS_MSG, Some(message_id)).await {
+                        log::info!("telegram: send /thread deny failed: {e}");
+                      }
+                      continue;
+                    }
+
+                    let rest = rest.clone().unwrap_or_default();
+                    if rest.trim().is_empty() {
+                      let cur = runtime.inner.codex.get_chat_thread(chat_id).await;
+                      let body = match cur {
+                        Some(id) => format!("Поточний діалог:\n{id}\n\nЗмінити: /thread <id>\nСписок: /threads"),
+                        None => "Немає вибраного діалогу.\n\nВибрати: /thread <id>\nСписок: /threads".to_string(),
+                      };
+                      if let Err(e) = tg_send_message_series(&client, &token, chat_id, &body, Some(message_id)).await {
+                        log::info!("telegram: send /thread help failed: {e}");
+                      }
+                      continue;
+                    }
+
+                    let raw = rest.trim().to_string();
+                    let thread_id = if let Ok(n) = raw.parse::<usize>() {
+                      last_threads
+                        .get(&chat_id)
+                        .and_then(|v| v.get(n.saturating_sub(1)))
+                        .cloned()
+                        .unwrap_or_default()
+                    } else {
+                      raw
+                    };
+                    if thread_id.trim().is_empty() {
+                      let msg = "Невірний номер. Спочатку виклич /threads і вибери 1-10.".to_string();
+                      if let Err(e) = tg_send_message_series(&client, &token, chat_id, &msg, Some(message_id)).await {
+                        log::info!("telegram: send /thread invalid failed: {e}");
+                      }
+                      continue;
+                    }
+
+                    // Attach this Telegram chat to a specific Codex thread id.
+                    match runtime.inner.codex.attach_chat_to_thread(chat_id, thread_id).await {
+                      Ok(_) => {
+                        if let Err(e) = tg_send_message(&client, &token, chat_id, "OK. Підключив до вибраного діалогу.", Some(message_id)).await {
+                          log::info!("telegram: send /thread ok failed: {e}");
+                        }
+                      }
+                      Err(e) => {
+                        let msg = format!("Codex error: {e}");
+                        if let Err(e) = tg_send_message_series(&client, &token, chat_id, &msg, Some(message_id)).await {
+                          log::info!("telegram: send /thread err failed: {e}");
+                        }
+                      }
+                    }
                   }
                   _ => {}
                 }
